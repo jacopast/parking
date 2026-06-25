@@ -5,19 +5,22 @@ Rhino 파일 안에서 바로 주차장 배치안을 빠르게 그려보는 도�
 ## Rhino Python workflow
 
 1. Rhino에서 대상 `.3dm` 파일을 엽니다.
-2. 사이트 외곽선이 될 닫힌 curve/polyline을 준비합니다.
-3. Rhino 명령창에서 `RunPythonScript`를 실행합니다.
-4. `rhino/parking_layout.py` 파일을 선택합니다.
-5. 외곽선을 선택하고 주차면 폭/깊이, 통로 폭, 각도, 여유 폭, 최대 행 수를 입력합니다.
+2. 주차가 가능한 영역을 닫힌 curve/polyline으로 준비합니다.
+3. 입구 중심점과 출구 중심점을 클릭할 수 있게 위치를 정합니다.
+4. Rhino 명령창에서 `RunPythonScript`를 실행합니다.
+5. `rhino/parking_layout.py` 파일을 선택합니다.
+6. 가능한 영역 curve, 입구점, 출구점을 순서대로 지정합니다.
+7. 주차면 폭/깊이, 통로 폭, 입구-출구 동선 폭, 각도, 여유 폭, 최대 행 수를 입력합니다.
 
 스크립트는 현재 Rhino 파일 안에 다음 레이어를 만들고 geometry를 추가합니다.
 
-- `Parking Layout::Reference Boundary`
+- `Parking Layout::Available Area`
 - `Parking Layout::Stalls`
 - `Parking Layout::Aisles`
+- `Parking Layout::Circulation`
 - `Parking Layout::Labels`
 
-주차면은 선택한 외곽선의 bounding box 안에 배치되며, 닫힌 외곽선을 선택한 경우 각 주차면 꼭짓점이 외곽선 안에 들어가는 것만 생성합니다.
+입구와 출구를 잇는 선을 기준 축으로 잡아 주차열을 정렬하고, 그 사이의 `Circulation` 폭은 비워둡니다. 주차면은 가능한 영역 안에 들어가면서 입구-출구 동선과 겹치지 않는 것만 생성합니다.
 
 ## Browser prototype
 
@@ -36,7 +39,7 @@ npm run build
 
 ## Features
 
-- Rhino 안에서 Python 스크립트로 주차면/통로/번호 레이어 생성
+- Rhino 안에서 Python 스크립트로 가능한 영역, 입구, 출구 기반 자동 주차 레이아웃 생성
 - Rhino `.3dm` 파일 업로드
 - Rhino 레이어, 오브젝트 수, 모델 경계 확인
 - 읽어낸 모델 경계를 설계 캔버스 크기에 반영
