@@ -10,7 +10,7 @@ Tools for quickly generating parking layout concepts from Rhino geometry. The pr
 4. Run Rhino's `RunPythonScript` command.
 5. Select `rhino/parking_layout.py`.
 6. Pick the usable area curve, entrance point, and exit point in order.
-7. Enter stall width/depth, aisle width, entrance-to-exit drive width, angle, setback, and maximum row count.
+7. Enter only the setback and maximum row count.
 
 The script creates geometry on these layers in the current Rhino file:
 
@@ -20,7 +20,7 @@ The script creates geometry on these layers in the current Rhino file:
 - `Parking Layout::Circulation`
 - `Parking Layout::Labels`
 
-The entrance-to-exit line defines the layout axis. The configured `Circulation` corridor is kept clear, and stalls are only generated when they fit inside the usable area and do not overlap that corridor.
+The entrance-to-exit line defines the layout axis. The script uses fixed 9 ft x 18 ft stalls, fixed perpendicular parking, and fixed 24 ft aisles/circulation. Stalls are only generated when they fit inside the usable area and do not overlap the entrance-to-exit circulation corridor.
 
 ## Browser prototype
 
@@ -40,6 +40,7 @@ npm run build
 ## Features
 
 - Generate parking layouts in Rhino from a usable area, entrance point, and exit point
+- Use fixed 9 ft x 18 ft perpendicular stalls with 24 ft aisles
 - Upload Rhino `.3dm` files in the browser prototype
 - Inspect Rhino layer, object count, and model bounds metadata
 - Apply readable model bounds to the layout canvas

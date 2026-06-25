@@ -1,9 +1,9 @@
 """Create quick parking layouts directly inside Rhino.
 
 Run with Rhino's Python editor or the RunPythonScript command. Pick a usable
-area curve plus entrance and exit points, set a few parking parameters, and the
-script draws parking stalls, circulation guides, labels, and a summary in the
-current Rhino file.
+area curve plus entrance and exit points, set a small number of layout limits,
+and the script draws parking stalls, circulation guides, labels, and a summary
+in the current Rhino file.
 
 The script intentionally uses rhinoscriptsyntax so it works in Rhino 7
 IronPython and Rhino 8 Python.
@@ -15,12 +15,12 @@ import rhinoscriptsyntax as rs
 
 
 DEFAULTS = {
-    "stall_width": 2.5,
-    "stall_depth": 5.0,
-    "aisle_width": 6.0,
-    "drive_width": 6.0,
+    "stall_width": 9.0,
+    "stall_depth": 18.0,
+    "aisle_width": 24.0,
+    "drive_width": 24.0,
     "angle": 90.0,
-    "margin": 1.5,
+    "margin": 3.0,
     "max_rows": 12,
 }
 
@@ -82,27 +82,7 @@ def get_integer(prompt, default, minimum=None, maximum=None):
 
 
 def collect_settings():
-    stall_width = get_number("Parking stall width", DEFAULTS["stall_width"], 1.8)
-    if stall_width is None:
-        return None
-
-    stall_depth = get_number("Parking stall depth", DEFAULTS["stall_depth"], 3.5)
-    if stall_depth is None:
-        return None
-
-    aisle_width = get_number("Drive aisle width", DEFAULTS["aisle_width"], 3.0)
-    if aisle_width is None:
-        return None
-
-    drive_width = get_number("Entrance-to-exit clear drive width", DEFAULTS["drive_width"], 3.0)
-    if drive_width is None:
-        return None
-
-    angle = get_number("Parking angle in degrees", DEFAULTS["angle"], 30.0, 90.0)
-    if angle is None:
-        return None
-
-    margin = get_number("Setback from boundary bounding box", DEFAULTS["margin"], 0.0)
+    margin = get_number("Setback from available area bounding box in feet", DEFAULTS["margin"], 0.0)
     if margin is None:
         return None
 
@@ -111,11 +91,11 @@ def collect_settings():
         return None
 
     return {
-        "stall_width": stall_width,
-        "stall_depth": stall_depth,
-        "aisle_width": aisle_width,
-        "drive_width": drive_width,
-        "angle": angle,
+        "stall_width": DEFAULTS["stall_width"],
+        "stall_depth": DEFAULTS["stall_depth"],
+        "aisle_width": DEFAULTS["aisle_width"],
+        "drive_width": DEFAULTS["drive_width"],
+        "angle": DEFAULTS["angle"],
         "margin": margin,
         "max_rows": max_rows,
     }
@@ -484,10 +464,10 @@ def draw_layout(boundary_id, entry_point, exit_point, settings):
         "Parking layout generated",
         "Stalls: %s" % stall_count,
         "Rows: %s" % row_count,
-        "Stall: %.2fm x %.2fm" % (stall_width, stall_depth),
-        "Aisle: %.2fm" % aisle_width,
-        "Entrance-exit drive: %.2fm" % drive_width,
-        "Angle: %.0f deg" % settings["angle"],
+        "Stall: %.1f ft x %.1f ft" % (stall_width, stall_depth),
+        "Aisle: %.1f ft" % aisle_width,
+        "Entrance-exit drive: %.1f ft" % drive_width,
+        "Parking: fixed perpendicular",
     ]
     summary_point = (
         world_rect["min_x"],
