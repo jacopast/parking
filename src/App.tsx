@@ -1,5 +1,5 @@
 import { ChangeEvent, useMemo, useState } from 'react';
-import rhino3dm from 'rhino3dm';
+import rhino3dm from 'rhino3dm/rhino3dm.module.js';
 
 type Point = {
   x: number;
@@ -263,7 +263,8 @@ async function parseRhinoFile(file: File): Promise<RhinoReference> {
       warnings,
     };
   } finally {
-    if (typeof doc?.delete === 'function') doc.delete();
+    const disposableDoc = doc as { delete?: () => void };
+    if (typeof disposableDoc.delete === 'function') disposableDoc.delete();
   }
 }
 
