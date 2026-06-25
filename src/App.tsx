@@ -57,7 +57,7 @@ const DEFAULT_SETTINGS: LayoutSettings = {
 };
 
 function formatMeters(value: number) {
-  return `${value.toLocaleString('ko-KR', { maximumFractionDigits: 1 })} m`;
+  return `${value.toLocaleString('en-US', { maximumFractionDigits: 1 })} m`;
 }
 
 function formatFileSize(bytes: number) {
@@ -370,7 +370,7 @@ function App() {
       }
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : 'Unknown Rhino import error';
-      setError(`Rhino 파일을 읽지 못했습니다: ${message}`);
+      setError(`Could not read the Rhino file: ${message}`);
     } finally {
       setIsImporting(false);
       event.target.value = '';
@@ -396,15 +396,15 @@ function App() {
       <section className="hero">
         <div>
           <p className="eyebrow">Parking Layout Lab</p>
-          <h1>Rhino 파일을 던지고, 주차장 배치를 바로 스케치하세요.</h1>
+          <h1>Drop in a Rhino file and sketch parking layouts fast.</h1>
           <p className="lede">
-            .3dm 파일에서 사이트 경계와 레이어 정보를 읽어 참고선으로 깔고, 주차면 규격과 각도,
-            통로 폭을 조절하면서 여러 배치안을 빠르게 비교할 수 있습니다.
+            Import site bounds and layer information from a .3dm file, then compare layout options
+            by adjusting stall dimensions, parking angle, and aisle width.
           </p>
         </div>
         <label className="upload-card">
-          <span>{isImporting ? 'Rhino 파일 읽는 중...' : 'Rhino .3dm 업로드'}</span>
-          <small>모델 경계가 읽히면 캔버스 크기에 자동 반영됩니다.</small>
+          <span>{isImporting ? 'Reading Rhino file...' : 'Upload Rhino .3dm'}</span>
+          <small>Readable model bounds are applied to the canvas automatically.</small>
           <input type="file" accept=".3dm" onChange={handleFileChange} disabled={isImporting} />
         </label>
       </section>
@@ -418,38 +418,38 @@ function App() {
 
       <section className="workspace">
         <aside className="panel">
-          <h2>배치 조건</h2>
+          <h2>Layout controls</h2>
           <div className="control-grid">
-            <NumberControl label="대지 폭" value={settings.siteWidth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteWidth', value)} />
-            <NumberControl label="대지 깊이" value={settings.siteDepth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteDepth', value)} />
-            <NumberControl label="행 수" value={settings.rows} min={1} max={20} step={1} onChange={(value) => updateSetting('rows', value)} />
-            <NumberControl label="열 수" value={settings.columns} min={1} max={80} step={1} onChange={(value) => updateSetting('columns', value)} />
-            <NumberControl label="주차면 폭" value={settings.stallWidth} min={2} max={4} step={0.1} suffix="m" onChange={(value) => updateSetting('stallWidth', value)} />
-            <NumberControl label="주차면 깊이" value={settings.stallDepth} min={4} max={7} step={0.1} suffix="m" onChange={(value) => updateSetting('stallDepth', value)} />
-            <NumberControl label="통로 폭" value={settings.aisleWidth} min={3} max={12} step={0.1} suffix="m" onChange={(value) => updateSetting('aisleWidth', value)} />
-            <NumberControl label="주차 각도" value={settings.angle} min={45} max={90} step={5} suffix="deg" onChange={(value) => updateSetting('angle', value)} />
-            <NumberControl label="외곽 여유" value={settings.margin} min={0} max={15} step={0.5} suffix="m" onChange={(value) => updateSetting('margin', value)} />
+            <NumberControl label="Site width" value={settings.siteWidth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteWidth', value)} />
+            <NumberControl label="Site depth" value={settings.siteDepth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteDepth', value)} />
+            <NumberControl label="Rows" value={settings.rows} min={1} max={20} step={1} onChange={(value) => updateSetting('rows', value)} />
+            <NumberControl label="Columns" value={settings.columns} min={1} max={80} step={1} onChange={(value) => updateSetting('columns', value)} />
+            <NumberControl label="Stall width" value={settings.stallWidth} min={2} max={4} step={0.1} suffix="m" onChange={(value) => updateSetting('stallWidth', value)} />
+            <NumberControl label="Stall depth" value={settings.stallDepth} min={4} max={7} step={0.1} suffix="m" onChange={(value) => updateSetting('stallDepth', value)} />
+            <NumberControl label="Aisle width" value={settings.aisleWidth} min={3} max={12} step={0.1} suffix="m" onChange={(value) => updateSetting('aisleWidth', value)} />
+            <NumberControl label="Parking angle" value={settings.angle} min={45} max={90} step={5} suffix="deg" onChange={(value) => updateSetting('angle', value)} />
+            <NumberControl label="Perimeter setback" value={settings.margin} min={0} max={15} step={0.5} suffix="m" onChange={(value) => updateSetting('margin', value)} />
           </div>
 
           <div className="actions">
             <button type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>
-              기본값
+              Reset defaults
             </button>
             <button type="button" onClick={exportJson}>
-              JSON 내보내기
+              Export JSON
             </button>
             <button type="button" onClick={exportSvg}>
-              SVG 내보내기
+              Export SVG
             </button>
           </div>
         </aside>
 
         <section className="canvas-panel">
           <div className="stats">
-            <Stat label="주차면" value={`${stalls.length}`} />
-            <Stat label="대지 면적" value={`${usedArea.toFixed(0)} m²`} />
-            <Stat label="100m²당" value={`${capacityDensity.toFixed(1)} 면`} />
-            <Stat label="행 피치" value={formatMeters(bayDepth + settings.aisleWidth)} />
+            <Stat label="Stalls" value={`${stalls.length}`} />
+            <Stat label="Site area" value={`${usedArea.toFixed(0)} m²`} />
+            <Stat label="Per 100 m²" value={`${capacityDensity.toFixed(1)} stalls`} />
+            <Stat label="Row pitch" value={formatMeters(bayDepth + settings.aisleWidth)} />
           </div>
 
           <svg
@@ -480,24 +480,24 @@ function App() {
       </section>
 
       <section className="reference-panel">
-        <h2>Rhino 참고 파일</h2>
+        <h2>Rhino reference file</h2>
         {reference ? (
           <div className="reference-grid">
-            <Stat label="파일" value={reference.fileName} />
-            <Stat label="크기" value={formatFileSize(reference.fileSize)} />
-            <Stat label="오브젝트" value={`${reference.objectCount}`} />
-            <Stat label="레이어" value={reference.layers.length ? reference.layers.join(', ') : '없음'} />
+            <Stat label="File" value={reference.fileName} />
+            <Stat label="Size" value={formatFileSize(reference.fileSize)} />
+            <Stat label="Objects" value={`${reference.objectCount}`} />
+            <Stat label="Layers" value={reference.layers.length ? reference.layers.join(', ') : 'None'} />
             <Stat
-              label="읽은 경계"
+              label="Read bounds"
               value={
                 reference.bounds
                   ? `${formatMeters(reference.bounds.width)} x ${formatMeters(reference.bounds.depth)}`
-                  : '경계 없음'
+                  : 'No bounds'
               }
             />
           </div>
         ) : (
-          <p className="empty">아직 업로드된 Rhino 파일이 없습니다. .3dm 파일을 올리면 모델 경계가 참고선으로 표시됩니다.</p>
+          <p className="empty">No Rhino file has been uploaded yet. Upload a .3dm file to show model bounds as references.</p>
         )}
       </section>
     </main>
