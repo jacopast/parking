@@ -1,6 +1,19 @@
 # Parking Layout Lab
 
-Tools for quickly generating parking layout concepts from Rhino geometry. The primary workflow is the Rhino Python script in `rhino/parking_layout.py`, which runs directly inside an open `.3dm` file. A browser prototype for uploading `.3dm` files and sketching 2D options is also included.
+Tools for quickly generating parking layout concepts from Rhino geometry. The browser workflow uploads a `.3dm`, generates design options from the readable model bounds, previews each option, and downloads a new `.3dm` with the selected parking layout added as Rhino geometry. A Rhino Python script is also included for direct in-Rhino generation.
+
+## Browser workflow
+
+1. Run the web app.
+2. Upload a Rhino `.3dm` file.
+3. Review the generated parking options.
+4. Adjust site width/depth, setback, and maximum row count if needed.
+5. Select the preferred option.
+6. Download the selected option as a `.3dm`.
+
+The downloaded Rhino file preserves the uploaded source document and adds the generated parking layout on new `Parking Layout Lab` layers.
+
+The web options use fixed 9 x 18 perpendicular stalls and fixed 24 aisles/circulation. These values are applied in Rhino model units, so uploaded files should use feet when those values are intended as feet.
 
 ## Rhino Python workflow
 
@@ -39,14 +52,14 @@ npm run build
 
 ## Features
 
+- Upload a Rhino `.3dm`, generate parking design options, and export a selected option back to `.3dm`
 - Generate parking layouts in Rhino from a usable area, entrance point, and exit point
 - Use fixed 9 ft x 18 ft perpendicular stalls with 24 ft aisles
-- Upload Rhino `.3dm` files in the browser prototype
 - Inspect Rhino layer, object count, and model bounds metadata
 - Apply readable model bounds to the layout canvas
-- Adjust site width/depth, stall width/depth, row/column count, aisle width, and parking angle
+- Adjust site width/depth, setback, and maximum row count
 - Preview parking concepts on an SVG canvas
-- Export layout options as JSON or SVG
+- Export layout options as Rhino `.3dm`, JSON, or SVG
 
 ## Notes
 
