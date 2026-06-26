@@ -22,19 +22,27 @@ type RhinoReference = {
   layers: string[];
   bounds?: Bounds;
   outlines: Point[][];
+  modelUnitSystem?: number;
+  sourceBytes: Uint8Array;
   warnings: string[];
 };
+
+type Orientation = 'horizontal' | 'vertical';
 
 type LayoutSettings = {
   siteWidth: number;
   siteDepth: number;
-  rows: number;
-  columns: number;
-  stallWidth: number;
-  stallDepth: number;
-  aisleWidth: number;
-  angle: number;
-  margin: number;
+  setback: number;
+  maxRows: number;
+};
+
+type LayoutOptionSpec = {
+  id: string;
+  name: string;
+  description: string;
+  orientation: Orientation;
+  setback: number;
+  maxRows: number;
 };
 
 type Stall = {
@@ -44,20 +52,39 @@ type Stall = {
   polygon: Point[];
 };
 
-const DEFAULT_SETTINGS: LayoutSettings = {
-  siteWidth: 62,
-  siteDepth: 42,
-  rows: 4,
-  columns: 12,
-  stallWidth: 2.5,
-  stallDepth: 5,
-  aisleWidth: 6,
-  angle: 90,
-  margin: 3,
+type Aisle = {
+  id: string;
+  polygon: Point[];
 };
 
-function formatMeters(value: number) {
-  return `${value.toLocaleString('en-US', { maximumFractionDigits: 1 })} m`;
+type LayoutOption = LayoutOptionSpec & {
+  stalls: Stall[];
+  aisles: Aisle[];
+  rowCount: number;
+  columnCount: number;
+  usedArea: number;
+  density: number;
+};
+
+const STALL_WIDTH = 9;
+const STALL_DEPTH = 18;
+const AISLE_WIDTH = 24;
+const DEFAULT_SETTINGS: LayoutSettings = {
+  siteWidth: 220,
+  siteDepth: 150,
+  setback: 6,
+  maxRows: 12,
+};
+
+const OPTION_COLORS = {
+  stall: '#ffb703',
+  stallAlt: '#7b9acc',
+  aisle: '#d6e4f4',
+  reference: '#ef476f',
+};
+
+function formatUnits(value: number) {
+  return `${value.toLocaleString('en-US', { maximumFractionDigits: 1 })}`;
 }
 
 function formatFileSize(bytes: number) {
@@ -221,8 +248,8 @@ function boundsToOutline(bounds: Bounds): Point[] {
 async function parseRhinoFile(file: File): Promise<RhinoReference> {
   const warnings: string[] = [];
   const rhino = await rhino3dm();
-  const buffer = await file.arrayBuffer();
-  const doc = rhino.File3dm.fromByteArray(new Uint8Array(buffer));
+  const sourceBytes = new Uint8Array(await file.arrayBuffer());
+  const doc = rhino.File3dm.fromByteArray(sourceBytes);
 
   try {
     const layersCollection = doc.layers?.();
@@ -250,7 +277,7 @@ async function parseRhinoFile(file: File): Promise<RhinoReference> {
 
     const bounds = mergeBounds(objectBounds);
     if (!bounds) {
-      warnings.push('Rhino geometry bounds could not be read. The layout canvas is still available.');
+      warnings.push('Rhino geometry bounds could not be read. Default site dimensions are being used.');
     }
 
     return {
@@ -260,50 +287,138 @@ async function parseRhinoFile(file: File): Promise<RhinoReference> {
       layers,
       bounds,
       outlines,
+      modelUnitSystem: readValue(doc.settings?.(), 'modelUnitSystem'),
+      sourceBytes,
       warnings,
     };
   } finally {
-    const disposableDoc = doc as { delete?: () => void };
+    const disposableDoc = doc as { delete?: () => void; destroy?: () => void };
     if (typeof disposableDoc.delete === 'function') disposableDoc.delete();
+    if (typeof disposableDoc.destroy === 'function') disposableDoc.destroy();
   }
 }
 
-function generateStalls(settings: LayoutSettings): Stall[] {
-  const radians = (settings.angle * Math.PI) / 180;
-  const horizontalShift = Math.cos(radians) * settings.stallDepth;
-  const bayDepth = Math.max(Math.sin(radians) * settings.stallDepth, settings.stallDepth * 0.5);
-  const maxRows = Math.max(1, Math.floor((settings.siteDepth - settings.margin * 2 + settings.aisleWidth) / (bayDepth + settings.aisleWidth)));
-  const maxColumns = Math.max(1, Math.floor((settings.siteWidth - settings.margin * 2 - Math.abs(horizontalShift)) / settings.stallWidth));
-  const rows = Math.min(settings.rows, maxRows);
-  const columns = Math.min(settings.columns, maxColumns);
+function createOptionSpecs(settings: LayoutSettings): LayoutOptionSpec[] {
+  return [
+    {
+      id: 'balanced',
+      name: 'Option A - Balanced bays',
+      description: 'Uses the uploaded bounds with the default setback and horizontal bays.',
+      orientation: 'horizontal',
+      setback: settings.setback,
+      maxRows: settings.maxRows,
+    },
+    {
+      id: 'rotated',
+      name: 'Option B - Rotated bays',
+      description: 'Rotates the bays 90 degrees to compare circulation and yield.',
+      orientation: 'vertical',
+      setback: settings.setback,
+      maxRows: settings.maxRows,
+    },
+    {
+      id: 'yield',
+      name: 'Option C - Higher yield',
+      description: 'Uses a tighter setback while keeping 9 x 18 stalls and 24 aisles.',
+      orientation: settings.siteWidth >= settings.siteDepth ? 'horizontal' : 'vertical',
+      setback: Math.max(0, settings.setback / 2),
+      maxRows: settings.maxRows + 2,
+    },
+  ];
+}
+
+function rectangle(x: number, y: number, width: number, height: number): Point[] {
+  return [
+    { x, y },
+    { x: x + width, y },
+    { x: x + width, y: y + height },
+    { x, y: y + height },
+  ];
+}
+
+function generateOption(spec: LayoutOptionSpec, settings: LayoutSettings): LayoutOption {
+  const rowsByDepth = Math.max(
+    0,
+    Math.floor((settings.siteDepth - spec.setback * 2 + AISLE_WIDTH) / (STALL_DEPTH + AISLE_WIDTH)),
+  );
+  const rowsByWidth = Math.max(
+    0,
+    Math.floor((settings.siteWidth - spec.setback * 2 + AISLE_WIDTH) / (STALL_DEPTH + AISLE_WIDTH)),
+  );
+  const columnsByWidth = Math.max(0, Math.floor((settings.siteWidth - spec.setback * 2) / STALL_WIDTH));
+  const columnsByDepth = Math.max(0, Math.floor((settings.siteDepth - spec.setback * 2) / STALL_WIDTH));
+
+  const rowCount = Math.min(spec.maxRows, spec.orientation === 'horizontal' ? rowsByDepth : rowsByWidth);
+  const columnCount = spec.orientation === 'horizontal' ? columnsByWidth : columnsByDepth;
   const stalls: Stall[] = [];
+  const aisles: Aisle[] = [];
 
-  for (let row = 0; row < rows; row += 1) {
-    const direction = row % 2 === 0 ? 1 : -1;
-    const shift = horizontalShift * direction;
-    const baseX = settings.margin + (shift < 0 ? Math.abs(shift) : 0);
-    const baseY = settings.margin + row * (bayDepth + settings.aisleWidth);
+  for (let row = 0; row < rowCount; row += 1) {
+    if (spec.orientation === 'horizontal') {
+      const y = spec.setback + row * (STALL_DEPTH + AISLE_WIDTH);
+      const aisleY = y + STALL_DEPTH;
 
-    for (let column = 0; column < columns; column += 1) {
-      const x = baseX + column * settings.stallWidth;
-      const y = baseY;
-      const polygon = [
-        { x, y },
-        { x: x + settings.stallWidth, y },
-        { x: x + settings.stallWidth + shift, y: y + bayDepth },
-        { x: x + shift, y: y + bayDepth },
-      ];
+      if (aisleY < settings.siteDepth - spec.setback) {
+        aisles.push({
+          id: `${spec.id}-aisle-${row + 1}`,
+          polygon: rectangle(
+            spec.setback,
+            aisleY,
+            Math.max(settings.siteWidth - spec.setback * 2, 0),
+            Math.min(AISLE_WIDTH, settings.siteDepth - spec.setback - aisleY),
+          ),
+        });
+      }
 
-      stalls.push({
-        id: `${row + 1}-${column + 1}`,
-        row,
-        column,
-        polygon,
-      });
+      for (let column = 0; column < columnCount; column += 1) {
+        const x = spec.setback + column * STALL_WIDTH;
+        stalls.push({
+          id: `${spec.id}-${row + 1}-${column + 1}`,
+          row,
+          column,
+          polygon: rectangle(x, y, STALL_WIDTH, STALL_DEPTH),
+        });
+      }
+    } else {
+      const x = spec.setback + row * (STALL_DEPTH + AISLE_WIDTH);
+      const aisleX = x + STALL_DEPTH;
+
+      if (aisleX < settings.siteWidth - spec.setback) {
+        aisles.push({
+          id: `${spec.id}-aisle-${row + 1}`,
+          polygon: rectangle(
+            aisleX,
+            spec.setback,
+            Math.min(AISLE_WIDTH, settings.siteWidth - spec.setback - aisleX),
+            Math.max(settings.siteDepth - spec.setback * 2, 0),
+          ),
+        });
+      }
+
+      for (let column = 0; column < columnCount; column += 1) {
+        const y = spec.setback + column * STALL_WIDTH;
+        stalls.push({
+          id: `${spec.id}-${row + 1}-${column + 1}`,
+          row,
+          column,
+          polygon: rectangle(x, y, STALL_DEPTH, STALL_WIDTH),
+        });
+      }
     }
   }
 
-  return stalls;
+  const usedArea = settings.siteWidth * settings.siteDepth;
+  const density = stalls.length / Math.max(usedArea / 10000, 1);
+
+  return {
+    ...spec,
+    stalls,
+    aisles,
+    rowCount,
+    columnCount,
+    usedArea,
+    density,
+  };
 }
 
 function normalizeReferencePoint(point: Point, bounds: Bounds, settings: LayoutSettings): Point {
@@ -313,11 +428,32 @@ function normalizeReferencePoint(point: Point, bounds: Bounds, settings: LayoutS
   };
 }
 
+function layoutPointToWorld(point: Point, reference: RhinoReference | null, settings: LayoutSettings): Point {
+  if (!reference?.bounds) return point;
+
+  return {
+    x: reference.bounds.minX + (point.x / settings.siteWidth) * reference.bounds.width,
+    y: reference.bounds.maxY - (point.y / settings.siteDepth) * reference.bounds.depth,
+  };
+}
+
 function polygonPoints(points: Point[]) {
   return points.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(' ');
 }
 
-function downloadText(fileName: string, content: string, type: string) {
+function closePolygon(points: Point[]) {
+  if (points.length === 0) return points;
+  return [...points, points[0]];
+}
+
+function toRhinoPoints(points: Point[], reference: RhinoReference | null, settings: LayoutSettings) {
+  return closePolygon(points).map((point) => {
+    const world = layoutPointToWorld(point, reference, settings);
+    return [world.x, world.y, 0];
+  });
+}
+
+function downloadBlob(fileName: string, content: BlobPart, type: string) {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -327,17 +463,100 @@ function downloadText(fileName: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
+function referenceSummary(reference: RhinoReference | null) {
+  if (!reference) return null;
+  return {
+    fileName: reference.fileName,
+    fileSize: reference.fileSize,
+    objectCount: reference.objectCount,
+    layers: reference.layers,
+    bounds: reference.bounds,
+    warnings: reference.warnings,
+  };
+}
+
+function safeFileStem(fileName: string) {
+  return fileName.replace(/\.[^.]+$/, '').replace(/[^a-z0-9-_]+/gi, '-').replace(/^-|-$/g, '') || 'parking-layout';
+}
+
+function addLayer(doc: any, name: string, color: { r: number; g: number; b: number }) {
+  const layers = doc.layers();
+  const existing = typeof layers.findName === 'function' ? layers.findName(name, '') : null;
+  if (existing && Number.isFinite(existing.index)) return existing.index;
+  return layers.addLayer(name, color);
+}
+
+function createAttributes(rhino: any, layerIndex: number, name: string) {
+  const attributes = new rhino.ObjectAttributes();
+  attributes.layerIndex = layerIndex;
+  attributes.name = name;
+  return attributes;
+}
+
+function addPolyline(doc: any, rhino: any, points: number[][], layerIndex: number, name: string) {
+  try {
+    const curve = new rhino.PolylineCurve(points);
+    const attributes = createAttributes(rhino, layerIndex, name);
+    doc.objects().add(curve, attributes);
+    const disposableCurve = curve as { delete?: () => void; destroy?: () => void };
+    if (typeof disposableCurve.delete === 'function') disposableCurve.delete();
+    if (typeof disposableCurve.destroy === 'function') disposableCurve.destroy();
+  } catch {
+    doc.objects().addPolyline(points);
+  }
+}
+
+async function exportRhinoFile(reference: RhinoReference, option: LayoutOption, settings: LayoutSettings) {
+  const rhino = await rhino3dm();
+  const doc = rhino.File3dm.fromByteArray(reference.sourceBytes);
+
+  try {
+    doc.applicationName = 'Parking Layout Lab';
+    doc.applicationDetails = `Generated option: ${option.name}`;
+
+    const layerRoot = `Parking Layout Lab - ${option.name}`;
+    const stallLayer = addLayer(doc, `${layerRoot} - Stalls`, { r: 255, g: 183, b: 3 });
+    const aisleLayer = addLayer(doc, `${layerRoot} - Aisles`, { r: 61, g: 90, b: 128 });
+    const summaryLayer = addLayer(doc, `${layerRoot} - Summary`, { r: 20, g: 30, b: 45 });
+
+    option.aisles.forEach((aisle, index) => {
+      addPolyline(doc, rhino, toRhinoPoints(aisle.polygon, reference, settings), aisleLayer, `Aisle ${index + 1}`);
+    });
+
+    option.stalls.forEach((stall, index) => {
+      addPolyline(doc, rhino, toRhinoPoints(stall.polygon, reference, settings), stallLayer, `Stall ${index + 1}`);
+    });
+
+    const summaryPoint = reference.bounds
+      ? [reference.bounds.minX, reference.bounds.maxY + AISLE_WIDTH, 0]
+      : [0, settings.siteDepth + AISLE_WIDTH, 0];
+    doc.objects().addTextDot(
+      `${option.name}\nStalls: ${option.stalls.length}\nStall: 9 x 18\nAisle: 24`,
+      summaryPoint,
+    );
+
+    const bytes = doc.toByteArray();
+    downloadBlob(`${safeFileStem(reference.fileName)}-${option.id}.3dm`, bytes, 'model/vnd.rhino.3dm');
+  } finally {
+    const disposableDoc = doc as { delete?: () => void; destroy?: () => void };
+    if (typeof disposableDoc.delete === 'function') disposableDoc.delete();
+    if (typeof disposableDoc.destroy === 'function') disposableDoc.destroy();
+  }
+}
+
 function App() {
   const [settings, setSettings] = useState<LayoutSettings>(DEFAULT_SETTINGS);
   const [reference, setReference] = useState<RhinoReference | null>(null);
+  const [selectedOptionId, setSelectedOptionId] = useState('balanced');
   const [isImporting, setIsImporting] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const stalls = useMemo(() => generateStalls(settings), [settings]);
-  const bayDepth = Math.max(Math.sin((settings.angle * Math.PI) / 180) * settings.stallDepth, settings.stallDepth * 0.5);
-  const usedArea = settings.siteWidth * settings.siteDepth;
-  const capacityDensity = stalls.length / Math.max(usedArea / 100, 1);
-
+  const options = useMemo(
+    () => createOptionSpecs(settings).map((spec) => generateOption(spec, settings)),
+    [settings],
+  );
+  const selectedOption = options.find((option) => option.id === selectedOptionId) ?? options[0];
   const normalizedOutlines = useMemo(() => {
     if (!reference?.bounds) return [];
     return reference.outlines.map((outline) => outline.map((point) => normalizeReferencePoint(point, reference.bounds!, settings)));
@@ -378,9 +597,9 @@ function App() {
   }
 
   function exportJson() {
-    downloadText(
-      'parking-layout.json',
-      JSON.stringify({ settings, reference, stalls }, null, 2),
+    downloadBlob(
+      'parking-layout-options.json',
+      JSON.stringify({ settings, reference: referenceSummary(reference), options }, null, 2),
       'application/json',
     );
   }
@@ -388,7 +607,26 @@ function App() {
   function exportSvg() {
     const svg = document.querySelector('.layout-canvas')?.outerHTML;
     if (!svg) return;
-    downloadText('parking-layout.svg', svg, 'image/svg+xml');
+    downloadBlob(`${selectedOption.id}.svg`, svg, 'image/svg+xml');
+  }
+
+  async function handleExportRhino() {
+    if (!reference) {
+      setError('Upload a Rhino file before exporting a .3dm option.');
+      return;
+    }
+
+    setIsExporting(true);
+    setError(null);
+
+    try {
+      await exportRhinoFile(reference, selectedOption, settings);
+    } catch (caught) {
+      const message = caught instanceof Error ? caught.message : 'Unknown Rhino export error';
+      setError(`Could not export the Rhino file: ${message}`);
+    } finally {
+      setIsExporting(false);
+    }
   }
 
   return (
@@ -396,15 +634,15 @@ function App() {
       <section className="hero">
         <div>
           <p className="eyebrow">Parking Layout Lab</p>
-          <h1>Drop in a Rhino file and sketch parking layouts fast.</h1>
+          <h1>Upload a Rhino file, compare parking options, export a new .3dm.</h1>
           <p className="lede">
-            Import site bounds and layer information from a .3dm file, then compare layout options
-            by adjusting stall dimensions, parking angle, and aisle width.
+            The web app reads the uploaded model bounds, generates multiple parking concepts with fixed 9 x 18 stalls and
+            24 aisles, and writes the selected option back into a downloadable Rhino file.
           </p>
         </div>
         <label className="upload-card">
           <span>{isImporting ? 'Reading Rhino file...' : 'Upload Rhino .3dm'}</span>
-          <small>Readable model bounds are applied to the canvas automatically.</small>
+          <small>Original geometry is preserved; generated parking layers are added on export.</small>
           <input type="file" accept=".3dm" onChange={handleFileChange} disabled={isImporting} />
         </label>
       </section>
@@ -418,45 +656,64 @@ function App() {
 
       <section className="workspace">
         <aside className="panel">
-          <h2>Layout controls</h2>
+          <h2>Design inputs</h2>
+          <div className="fixed-specs">
+            <span>Fixed stall</span>
+            <strong>9 x 18</strong>
+            <span>Fixed aisle</span>
+            <strong>24</strong>
+            <span>Parking angle</span>
+            <strong>90 deg</strong>
+          </div>
+
           <div className="control-grid">
-            <NumberControl label="Site width" value={settings.siteWidth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteWidth', value)} />
-            <NumberControl label="Site depth" value={settings.siteDepth} min={10} max={300} step={0.5} suffix="m" onChange={(value) => updateSetting('siteDepth', value)} />
-            <NumberControl label="Rows" value={settings.rows} min={1} max={20} step={1} onChange={(value) => updateSetting('rows', value)} />
-            <NumberControl label="Columns" value={settings.columns} min={1} max={80} step={1} onChange={(value) => updateSetting('columns', value)} />
-            <NumberControl label="Stall width" value={settings.stallWidth} min={2} max={4} step={0.1} suffix="m" onChange={(value) => updateSetting('stallWidth', value)} />
-            <NumberControl label="Stall depth" value={settings.stallDepth} min={4} max={7} step={0.1} suffix="m" onChange={(value) => updateSetting('stallDepth', value)} />
-            <NumberControl label="Aisle width" value={settings.aisleWidth} min={3} max={12} step={0.1} suffix="m" onChange={(value) => updateSetting('aisleWidth', value)} />
-            <NumberControl label="Parking angle" value={settings.angle} min={45} max={90} step={5} suffix="deg" onChange={(value) => updateSetting('angle', value)} />
-            <NumberControl label="Perimeter setback" value={settings.margin} min={0} max={15} step={0.5} suffix="m" onChange={(value) => updateSetting('margin', value)} />
+            <NumberControl label="Site width" value={settings.siteWidth} min={30} max={1000} step={1} suffix="units" onChange={(value) => updateSetting('siteWidth', value)} />
+            <NumberControl label="Site depth" value={settings.siteDepth} min={30} max={1000} step={1} suffix="units" onChange={(value) => updateSetting('siteDepth', value)} />
+            <NumberControl label="Setback" value={settings.setback} min={0} max={60} step={1} suffix="units" onChange={(value) => updateSetting('setback', value)} />
+            <NumberControl label="Maximum rows" value={settings.maxRows} min={1} max={40} step={1} onChange={(value) => updateSetting('maxRows', value)} />
           </div>
 
           <div className="actions">
-            <button type="button" onClick={() => setSettings(DEFAULT_SETTINGS)}>
-              Reset defaults
-            </button>
             <button type="button" onClick={exportJson}>
-              Export JSON
+              Export options JSON
             </button>
             <button type="button" onClick={exportSvg}>
-              Export SVG
+              Export selected SVG
+            </button>
+            <button type="button" onClick={handleExportRhino} disabled={!reference || isExporting}>
+              {isExporting ? 'Writing .3dm...' : 'Download selected .3dm'}
             </button>
           </div>
         </aside>
 
         <section className="canvas-panel">
+          <div className="option-grid">
+            {options.map((option) => (
+              <button
+                className={option.id === selectedOption.id ? 'option-card active' : 'option-card'}
+                key={option.id}
+                type="button"
+                onClick={() => setSelectedOptionId(option.id)}
+              >
+                <span>{option.name}</span>
+                <strong>{option.stalls.length} stalls</strong>
+                <small>{option.description}</small>
+              </button>
+            ))}
+          </div>
+
           <div className="stats">
-            <Stat label="Stalls" value={`${stalls.length}`} />
-            <Stat label="Site area" value={`${usedArea.toFixed(0)} m²`} />
-            <Stat label="Per 100 m²" value={`${capacityDensity.toFixed(1)} stalls`} />
-            <Stat label="Row pitch" value={formatMeters(bayDepth + settings.aisleWidth)} />
+            <Stat label="Selected option" value={selectedOption.name.replace('Option ', '')} />
+            <Stat label="Stalls" value={`${selectedOption.stalls.length}`} />
+            <Stat label="Rows x columns" value={`${selectedOption.rowCount} x ${selectedOption.columnCount}`} />
+            <Stat label="Density" value={`${selectedOption.density.toFixed(1)} stalls / 10k sq units`} />
           </div>
 
           <svg
             className="layout-canvas"
             viewBox={`0 0 ${settings.siteWidth} ${settings.siteDepth}`}
             role="img"
-            aria-label="Parking layout canvas"
+            aria-label="Parking layout option preview"
           >
             <rect className="site-fill" x="0" y="0" width={settings.siteWidth} height={settings.siteDepth} rx="0.4" />
 
@@ -464,13 +721,11 @@ function App() {
               <polyline className="rhino-outline" key={`outline-${index}`} points={polygonPoints(outline)} />
             ))}
 
-            {Array.from({ length: settings.rows }).map((_, index) => {
-              const y = settings.margin + index * (bayDepth + settings.aisleWidth) + bayDepth;
-              if (y > settings.siteDepth - settings.margin) return null;
-              return <rect className="aisle" key={index} x={settings.margin} y={y} width={settings.siteWidth - settings.margin * 2} height={settings.aisleWidth} />;
-            })}
+            {selectedOption.aisles.map((aisle) => (
+              <polygon className="aisle" key={aisle.id} points={polygonPoints(aisle.polygon)} />
+            ))}
 
-            {stalls.map((stall) => (
+            {selectedOption.stalls.map((stall) => (
               <polygon className={stall.row % 2 === 0 ? 'stall' : 'stall alternate'} key={stall.id} points={polygonPoints(stall.polygon)} />
             ))}
 
@@ -491,13 +746,13 @@ function App() {
               label="Read bounds"
               value={
                 reference.bounds
-                  ? `${formatMeters(reference.bounds.width)} x ${formatMeters(reference.bounds.depth)}`
+                  ? `${formatUnits(reference.bounds.width)} x ${formatUnits(reference.bounds.depth)}`
                   : 'No bounds'
               }
             />
           </div>
         ) : (
-          <p className="empty">No Rhino file has been uploaded yet. Upload a .3dm file to show model bounds as references.</p>
+          <p className="empty">Upload a .3dm file to use its model bounds as the design basis and enable Rhino export.</p>
         )}
       </section>
     </main>
