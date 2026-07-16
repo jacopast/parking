@@ -399,6 +399,19 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
     }
 
 
+def make_control(control_type, text=None):
+    """Create Eto controls without relying on keyword constructor support."""
+    try:
+        control = control_type()
+    except TypeError:
+        control = control_type(text or "")
+
+    if text is not None and hasattr(control, "Text"):
+        control.Text = text
+
+    return control
+
+
 class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
     def __init__(self):
         if not forms:
@@ -410,29 +423,29 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
         self.site_curve_id = None
         self.access_points = []
 
-        self.site_label = forms.Label(Text="No site curve selected")
-        self.access_label = forms.Label(Text="No access points selected")
-        self.required_box = forms.TextBox(Text=str(DEFAULT_REQUIRED_STALLS))
-        self.setback_box = forms.TextBox(Text=str(DEFAULT_SETBACK))
-        self.max_levels_box = forms.TextBox(Text=str(DEFAULT_MAX_LEVELS))
-        self.status_label = forms.Label(Text="Ready")
+        self.site_label = make_control(forms.Label, "No site curve selected")
+        self.access_label = make_control(forms.Label, "No access points selected")
+        self.required_box = make_control(forms.TextBox, str(DEFAULT_REQUIRED_STALLS))
+        self.setback_box = make_control(forms.TextBox, str(DEFAULT_SETBACK))
+        self.max_levels_box = make_control(forms.TextBox, str(DEFAULT_MAX_LEVELS))
+        self.status_label = make_control(forms.Label, "Ready")
 
-        pick_site = forms.Button(Text="Pick Site Curve")
+        pick_site = make_control(forms.Button, "Pick Site Curve")
         pick_site.Click += self.on_pick_site
-        pick_access = forms.Button(Text="Pick Access Points")
+        pick_access = make_control(forms.Button, "Pick Access Points")
         pick_access.Click += self.on_pick_access
-        generate = forms.Button(Text="Generate Feasibility Geometry")
+        generate = make_control(forms.Button, "Generate Feasibility Geometry")
         generate.Click += self.on_generate
-        close = forms.Button(Text="Close")
+        close = make_control(forms.Button, "Close")
         close.Click += self.on_close
 
         layout = forms.DynamicLayout()
         layout.Spacing = drawing.Size(6, 6)
-        layout.AddRow(forms.Label(Text="Site"), self.site_label, pick_site)
-        layout.AddRow(forms.Label(Text="Access"), self.access_label, pick_access)
-        layout.AddRow(forms.Label(Text="Required stalls"), self.required_box)
-        layout.AddRow(forms.Label(Text="Setback"), self.setback_box)
-        layout.AddRow(forms.Label(Text="Max garage levels"), self.max_levels_box)
+        layout.AddRow(make_control(forms.Label, "Site"), self.site_label, pick_site)
+        layout.AddRow(make_control(forms.Label, "Access"), self.access_label, pick_access)
+        layout.AddRow(make_control(forms.Label, "Required stalls"), self.required_box)
+        layout.AddRow(make_control(forms.Label, "Setback"), self.setback_box)
+        layout.AddRow(make_control(forms.Label, "Max garage levels"), self.max_levels_box)
         layout.AddRow(None)
         layout.AddRow(generate)
         layout.AddRow(self.status_label)
