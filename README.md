@@ -1,6 +1,28 @@
 # Parking Layout Lab
 
-Tools for quickly generating parking layout concepts from Rhino geometry. The browser workflow uploads a `.3dm`, generates design options from the readable model bounds, previews each option, and downloads a new `.3dm` with the selected parking layout added as Rhino geometry. A Rhino Python script is also included for direct in-Rhino generation.
+Tools for quickly generating parking layout concepts from Rhino geometry. The browser workflow uploads a `.3dm`, generates design options from the readable model bounds, previews each option, and downloads a new `.3dm` with the selected parking layout added as Rhino geometry. Rhino Python scripts are also included for direct in-Rhino generation and feasibility studies.
+
+## Rhino feasibility panel workflow
+
+Run `rhino/parking_feasibility_panel.py` with Rhino's `RunPythonScript` command. It opens a compact panel-style dialog for early parking feasibility studies.
+
+Inputs:
+
+- Usable site boundary curve
+- Optional vehicle access points
+- Required stall count
+- Setback
+- Maximum garage levels
+
+Outputs:
+
+- Surface parking geometry using fixed 9 ft x 18 ft stalls and 24 ft aisles
+- A stall-count comparison against the required parking count
+- Garage option geometry when surface parking is short
+- Concept-level garage footprint, level count, stalls per level, total stalls, and efficiency notes
+- Rhino layers under `Parking Feasibility`
+
+The garage output is schematic and intended for feasibility studies. It estimates the number of required levels and rough footprint dimensions before detailed ramp, column, structural, and code planning.
 
 ## Browser workflow
 
@@ -53,6 +75,7 @@ npm run build
 ## Features
 
 - Upload a Rhino `.3dm`, generate parking design options, and export a selected option back to `.3dm`
+- Run a Rhino panel-style feasibility tool from a site curve and required stall count
 - Generate parking layouts in Rhino from a usable area, entrance point, and exit point
 - Use fixed 9 ft x 18 ft perpendicular stalls with 24 ft aisles
 - Inspect Rhino layer, object count, and model bounds metadata
