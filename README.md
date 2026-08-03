@@ -169,8 +169,9 @@ The packer automates the usual sketching loop:
 3. Place a perimeter stall row on the **outside** of the ring only (backs toward the setback). Skip the street frontage and acute corners.
 4. Fill **everything inside the ring** with a 90 degree double-loaded module grid. Prefer island aisles along the long core axis.
 5. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Drop stalls in sharp tips where a car cannot back out.
-6. If an orthogonal racetrack will not fit, fall back to a site-offset ring (same outer-stall + interior-grid rules).
-7. Keep the trial with the most driveable stalls; prefer orthogonal rings and long-axis aisles when counts are close.
+6. Circulation rings must not have **acute drive corners** — turns sharper than 90° are rejected. Prefer orthogonal racetracks.
+7. If an orthogonal racetrack will not fit, fall back to a site-offset ring only when that ring also has no acute corners.
+8. Keep the trial with the most driveable stalls; prefer orthogonal rings and long-axis aisles when counts are close.
 
 Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 

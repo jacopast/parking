@@ -12,13 +12,17 @@ Surface lots are planned the way practitioners iterate a sketch:
    the setback / property edge). The inside of the loop is not single-loaded
    again — that would waste a module edge.
 4. Fill everything inside the ring with a 90 degree double-loaded module
-   grid, searching lattice phase (tile-and-trim).
-5. Keep the candidate with the most driveable stalls. Prefer orthogonal
-   rings over site-offset rings when counts tie.
+   grid, searching lattice phase (tile-and-trim). Island aisles prefer the
+   long axis of the core so each bay run is as long as possible.
+5. Reject any stall in an acute corner, and reject any stall that does not
+   have a clear 24 ft maneuvering aisle in front (SUDAS / ULI 90 degree rule).
+6. Reject circulation rings whose drive path has an acute corner. Drivers
+   should not have to turn sharper than 90 degrees on the aisle network.
+7. Keep the candidate with the most driveable stalls. Prefer orthogonal
+   rings and long-axis island aisles when counts are close.
 
-If no orthogonal racetrack fits (awkward pockets), fall back to a ring that
-offsets the site boundary. Diagonal 60/45 modules are last-resort only when
-90 degree search returns nothing.
+If no orthogonal racetrack fits, fall back to a site-offset ring only when
+that ring also has no acute drive corners. Diagonal 60/45 is last-resort.
 
 Module widths come from Iowa SUDAS 8B-1 Table 8B-1.02 (ULI/NPA). They set
 the lattice period; trial-and-error over orientation and ring geometry
@@ -36,11 +40,15 @@ DOUBLE_LOADED_MODULE = 2 * STALL_STRIPE + AISLE_WIDTH
 RING_WIDTH = 24.0
 MIN_RUN_COLUMNS = 3
 MIN_CORE_SPAN = 42.0  # at least one single-loaded module depth
+# Smallest orthogonal racetrack footprint worth seating in a site.
+MIN_RACETRACK_SPAN = RING_WIDTH * 2 + STALL_STRIPE + 24.0
 DRIVEWAY_CLEAR = 28.0
 # Interior angles sharper than this cannot host 90 degree stalls.
 ACUTE_CORNER_DEG = 80.0
 # Keep stalls this far from an acute vertex (stall depth + aisle throat).
 ACUTE_KEEP_OUT = STALL_STRIPE + AISLE_WIDTH * 0.5
+# Drive aisles / ring loops must not ask for a turn sharper than a right angle.
+MIN_DRIVE_CORNER_DEG = 90.0
 
 AISLE_WIDTHS = {
     (90, "two-way"): 24.0,
@@ -205,6 +213,38 @@ def acute_vertices(polygon, threshold_deg=ACUTE_CORNER_DEG):
         if angle < threshold_deg:
             result.append((index, angle, polygon[index]))
     return result
+
+
+def as_xy_polygon(points):
+    """Normalize ring polylines that may carry a Z component."""
+    if not points:
+        return []
+    return [(point[0], point[1]) for point in points]
+
+
+def polygon_min_interior_angle(polygon):
+    if not polygon or len(polygon) < 3:
+        return 0.0
+    return min(interior_angle_deg(polygon, index) for index in range(len(polygon)))
+
+
+def drive_path_has_sharp_turn(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG):
+    """True when a driver would have to turn sharper than a right angle."""
+    poly = as_xy_polygon(polygon)
+    if len(poly) < 3:
+        return True
+    return polygon_min_interior_angle(poly) < min_corner_deg - 0.5
+
+
+def ring_drive_is_acceptable(ring_outer_poly, ring_inner_poly=None):
+    """Circulation loops must stay at right angles or flatter — no acute aisles."""
+    if not ring_outer_poly:
+        return False
+    if drive_path_has_sharp_turn(ring_outer_poly):
+        return False
+    if ring_inner_poly and drive_path_has_sharp_turn(ring_inner_poly):
+        return False
+    return True
 
 
 def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT):
@@ -664,37 +704,101 @@ def rectangle_inside_polygon(polygon, basis, u0, u1, v0, v1, margin=0.0):
     return True
 
 
+def _ortho_rect_from_center(polygon, basis, cu, cv, max_half_u, max_half_v, margin):
+    """Largest UV rectangle centered at (cu, cv) that stays inside the site."""
+    best = None
+    best_area = 0.0
+    steps = 14
+    for index in range(1, steps + 1):
+        hu = max_half_u * index / float(steps)
+        lo = 0.0
+        hi = max_half_v
+        fit_hv = None
+        for _ in range(18):
+            mid = 0.5 * (lo + hi)
+            if rectangle_inside_polygon(
+                polygon, basis, cu - hu, cu + hu, cv - mid, cv + mid, margin,
+            ):
+                fit_hv = mid
+                lo = mid
+            else:
+                hi = mid
+        if fit_hv is None:
+            continue
+        width = 2.0 * hu
+        height = 2.0 * fit_hv
+        if width < MIN_RACETRACK_SPAN or height < MIN_RACETRACK_SPAN:
+            continue
+        area = width * height
+        if area > best_area:
+            best_area = area
+            best = (cu - hu, cu + hu, cv - fit_hv, cv + fit_hv)
+    return best, best_area
+
+
 def fitted_ortho_rect(polygon, basis, margin=0.0):
     """Largest axis-aligned rectangle in the parking frame that fits the site.
 
-    Uniform inset of the oriented bounding box, found by binary search.
-    This is the racetrack footprint that keeps circulation orthogonal to the
-    stall grid (no oblique ring corners in UV).
+    Tries a uniform bbox inset first (fast path for near-rectangular lots),
+    then grows rectangles from interior sample centers so triangular and
+    tapered sites still get an orthogonal racetrack with only 90 degree turns.
     """
     min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
     width = max_u - min_u
     height = max_v - min_v
-    if width < MIN_CORE_SPAN or height < MIN_CORE_SPAN:
+    if width < MIN_RACETRACK_SPAN or height < MIN_RACETRACK_SPAN:
         return None
 
+    best = None
+    best_area = 0.0
+
+    # Fast path: uniform inset of the oriented bounds.
     lo = 0.0
     hi = 0.5 * min(width, height)
-    best = None
-
     for _ in range(28):
         mid = 0.5 * (lo + hi)
         u0 = min_u + mid
         u1 = max_u - mid
         v0 = min_v + mid
         v1 = max_v - mid
-        if u1 - u0 < MIN_CORE_SPAN or v1 - v0 < MIN_CORE_SPAN:
+        if u1 - u0 < MIN_RACETRACK_SPAN or v1 - v0 < MIN_RACETRACK_SPAN:
             hi = mid
             continue
         if rectangle_inside_polygon(polygon, basis, u0, u1, v0, v1, margin):
             best = (u0, u1, v0, v1)
+            best_area = (u1 - u0) * (v1 - v0)
             hi = mid
         else:
             lo = mid
+
+    max_half_u = 0.5 * width
+    max_half_v = 0.5 * height
+    centers = []
+    seen = set()
+
+    def add_center(cu, cv):
+        key = (round(cu, 1), round(cv, 1))
+        if key in seen:
+            return
+        x, y = to_world(basis, cu, cv)
+        if not has_clearance(polygon, x, y, margin):
+            return
+        seen.add(key)
+        centers.append((cu, cv))
+
+    cwx, cwy = polygon_centroid(polygon)
+    add_center(*to_local(basis, cwx, cwy))
+    for fu in (0.3, 0.4, 0.5, 0.6, 0.7):
+        for fv in (0.3, 0.4, 0.5, 0.6, 0.7):
+            add_center(min_u + width * fu, min_v + height * fv)
+
+    for cu, cv in centers:
+        rect, area = _ortho_rect_from_center(
+            polygon, basis, cu, cv, max_half_u, max_half_v, margin,
+        )
+        if rect and area > best_area:
+            best = rect
+            best_area = area
 
     return best
 
@@ -1185,6 +1289,13 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
 
 
 def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_polygon):
+    # No acute turns on the circulation loop — a car should not bend past 90 deg.
+    if not ring_drive_is_acceptable(
+        ring_meta.get("ring_outer_poly"),
+        ring_meta.get("ring_inner_poly"),
+    ):
+        return None
+
     interior_stalls = interior["stalls"] if interior else []
     combined = list(ring_stalls) + list(interior_stalls)
     # Final gate: every kept stall must have a real 24 ft aisle and stay out of acute tips.
@@ -1220,9 +1331,11 @@ def candidate_score(candidate):
     """Stall count first; prefer orthogonal rings and long-axis island aisles."""
     if candidate is None:
         return -1
+    # Orthogonal rings are always 90 degree turns — prefer them strongly over
+    # site-following loops that only barely clear the no-acute test.
     return (
         candidate["stall_count"]
-        + (5 if candidate.get("ortho_bonus") else 0)
+        + (12 if candidate.get("ortho_bonus") else 0)
         + (3 if candidate.get("long_aisle_bonus") else 0)
     )
 
