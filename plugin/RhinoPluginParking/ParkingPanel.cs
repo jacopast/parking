@@ -7,7 +7,7 @@ using Rhino.UI;
 namespace RhinoPluginParking;
 
 [Guid("01308BBD-506B-4BF5-BD78-95CE641C7FDE")]
-public sealed class ParkingPanel : Panel, IPanel
+public sealed class ParkingPanel : Eto.Forms.Panel, IPanel
 {
     public static Guid PanelId => typeof(ParkingPanel).GUID;
 
