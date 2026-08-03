@@ -1,7 +1,7 @@
 """Create a driveable surface parking layout inside Rhino.
 
-Run with Rhino's RunPythonScript command. Pick a closed usable area curve
-plus the entrance and exit points.
+Run with Rhino's RunPythonScript command. Pick a closed usable area curve,
+then pick a point on the edge that fronts the public street.
 
 The layout uses circulation-first packing:
 
@@ -69,6 +69,26 @@ def add_polyline(points, layer, close=True):
     return object_id
 
 
+def pick_street_edge(boundary_id, polygon):
+    """Ask the user to identify the site edge that fronts the street."""
+    pick = rs.GetPointOnCurve(boundary_id, "Pick the site edge that fronts the street")
+    if not pick:
+        # Fallback when GetPointOnCurve is unavailable or cancelled mid-gesture.
+        pick = rs.GetPoint("Pick a point on the site edge that fronts the street")
+    if not pick:
+        return None
+
+    street_edge = core.street_edge_from_pick(polygon, pick)
+    if not street_edge:
+        rs.MessageBox(
+            "Could not match that pick to a boundary edge. Click closer to the street side.",
+            48,
+            "Parking Layout",
+        )
+        return None
+    return street_edge
+
+
 def draw_ring(polygon, z, layout):
     created = []
     outer, inner = core.layout_ring_polylines(layout, polygon, z)
@@ -86,8 +106,20 @@ def draw_ring(polygon, z, layout):
     return created
 
 
-def draw_access(polygon, z, layout, entry_point, exit_point):
-    """Draw curb cuts from the access points into the ring drive."""
+def draw_street_edge(street_edge, z):
+    """Highlight the designated street frontage."""
+    created = []
+    a = street_edge["a"]
+    b = street_edge["b"]
+    edge_id = rs.AddLine((a[0], a[1], z), (b[0], b[1], z))
+    if edge_id:
+        rs.ObjectLayer(edge_id, LAYERS["circulation"])
+        created.append(edge_id)
+    return created
+
+
+def draw_access(polygon, z, layout, access_points):
+    """Draw curb cuts from the street-edge access points into the ring drive."""
     created = []
     outer, inner = core.layout_ring_polylines(layout, polygon, z)
     ring_center = None
@@ -99,7 +131,7 @@ def draw_access(polygon, z, layout, entry_point, exit_point):
     elif layout.get("ring_mode") != "ortho":
         ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
 
-    for point in (entry_point, exit_point):
+    for point in access_points:
         access = core.as_tuple(point)
         marker_plane = rs.PlaneFromNormal((access[0], access[1], z), (0, 0, 1))
         marker = rs.AddCircle(marker_plane, 3.0)
@@ -125,13 +157,14 @@ def draw_access(polygon, z, layout, entry_point, exit_point):
     return created
 
 
-def draw_layout(boundary_id, entry_point, exit_point, setback):
+def draw_layout(boundary_id, street_edge, setback):
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
         rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
         return None
 
-    layout = core.best_layout(polygon, z, setback, [entry_point, exit_point])
+    access_points = core.access_points_on_street_edge(street_edge)
+    layout = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
     if not layout:
         rs.MessageBox(
             "No parking bay fits inside the perimeter drive. Try a smaller setback or a larger site.",
@@ -149,7 +182,8 @@ def draw_layout(boundary_id, entry_point, exit_point, setback):
         created.append(reference_copy)
 
     created.extend(draw_ring(polygon, z, layout))
-    created.extend(draw_access(polygon, z, layout, entry_point, exit_point))
+    created.extend(draw_street_edge(street_edge, z))
+    created.extend(draw_access(polygon, z, layout, access_points))
 
     for aisle in layout["aisles"]:
         object_id = add_polyline(aisle, LAYERS["aisles"])
@@ -183,30 +217,33 @@ def main():
         rs.MessageBox("Use a closed available area curve for the automatic layout.", 48, "Parking Layout")
         return
 
-    entry_point = rs.GetPoint("Pick the entrance center point")
-    if not entry_point:
+    polygon, _z = core.boundary_polygon(boundary_id, rs)
+    if not polygon:
+        rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
         return
 
-    exit_point = rs.GetPoint("Pick the exit center point")
-    if not exit_point:
+    street_edge = pick_street_edge(boundary_id, polygon)
+    if not street_edge:
         return
 
     setback = get_number("Setback from the property line in feet", DEFAULT_SETBACK, 0.0)
     if setback is None:
         return
 
-    layout = draw_layout(boundary_id, entry_point, exit_point, setback)
+    layout = draw_layout(boundary_id, street_edge, setback)
     if layout:
         rs.MessageBox(
             "Stalls: %s (%s on the perimeter)\n"
             "Parking: %s degree %s bays\n"
             "Aisle orientation: %.0f degrees\n"
+            "Street frontage length: %.0f ft\n"
             "Accessible stalls required: %s including %s van" % (
                 layout["stall_count"],
                 layout["perimeter_stalls"],
                 layout["park_angle"],
                 layout["flow"],
                 layout["angle"],
+                street_edge["length"],
                 layout["ada"]["accessible"],
                 layout["ada"]["van"],
             ),

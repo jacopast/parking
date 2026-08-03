@@ -58,9 +58,9 @@ It opens a compact dialog inside Rhino.
 | Input | Required | Description |
 | --- | --- | --- |
 | Site curve | Yes | Closed curve defining the usable parking area. |
-| Access points | No | Optional vehicle entry or exit reference points. |
+| Street edge | Yes | Pick a point on the boundary edge that fronts the public street. |
 | Required stalls | Yes | Target parking count for the project. |
-| Setback | Yes | Offset from the selected site boundary bounding box. |
+| Setback | Yes | Offset from the selected site boundary. |
 | Maximum garage levels | Yes | Upper limit used when testing garage options. |
 
 ### Outputs
@@ -109,10 +109,8 @@ rhino/parking_layout.py
 It prompts for:
 
 1. a usable area curve
-2. an entrance point
-3. an exit point
-4. setback
-5. maximum row count
+2. the street-frontage edge (click a point on that boundary side)
+3. setback
 
 It generates:
 
@@ -121,7 +119,6 @@ Parking Layout::Available Area
 Parking Layout::Stalls
 Parking Layout::Aisles
 Parking Layout::Circulation
-Parking Layout::Labels
 ```
 
 ## Design basis

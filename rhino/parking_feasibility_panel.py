@@ -1,9 +1,9 @@
 """Rhino parking feasibility generator.
 
 Run with Rhino's RunPythonScript command. The script opens a compact dialog
-that lets users pick a usable site curve, optionally pick access points, enter
-the required stall count, and generate schematic surface and garage parking
-geometry in Rhino layers.
+that lets users pick a usable site curve, pick the street-frontage edge,
+enter the required stall count, and generate schematic surface and garage
+parking geometry in Rhino layers.
 
 This is intentionally a feasibility-level tool:
 - fixed 9 x 18 stalls and 24 ft aisles
@@ -224,8 +224,16 @@ def draw_garage_option(option, base_y_offset):
     return [object_id] if object_id else []
 
 
-def draw_access(access_points, z):
+def draw_access(access_points, z, street_edge=None):
     created = []
+    if street_edge:
+        a = street_edge["a"]
+        b = street_edge["b"]
+        edge_id = rs.AddLine((a[0], a[1], z), (b[0], b[1], z))
+        if edge_id:
+            rs.ObjectLayer(edge_id, LAYERS["access"])
+            created.append(edge_id)
+
     for point in access_points:
         access = core.as_tuple(point)
         marker_plane = rs.PlaneFromNormal((access[0], access[1], z), (0, 0, 1))
@@ -236,7 +244,16 @@ def draw_access(access_points, z):
     return created
 
 
-def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_levels):
+def pick_street_edge(site_curve_id, polygon):
+    pick = rs.GetPointOnCurve(site_curve_id, "Pick the site edge that fronts the street")
+    if not pick:
+        pick = rs.GetPoint("Pick a point on the site edge that fronts the street")
+    if not pick:
+        return None
+    return core.street_edge_from_pick(polygon, pick)
+
+
+def run_feasibility(site_curve_id, street_edge, required_stalls, setback, max_levels):
     if not site_curve_id:
         rs.MessageBox("Select a site curve before generating options.", 48, "Parking Feasibility")
         return None
@@ -254,9 +271,10 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
         rs.ObjectLayer(site_copy, LAYERS["site"])
         created.append(site_copy)
 
-    created.extend(draw_access(access_points, z))
+    access_points = core.access_points_on_street_edge(street_edge) if street_edge else []
+    created.extend(draw_access(access_points, z, street_edge))
 
-    surface = core.best_layout(polygon, z, setback, access_points)
+    surface = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
     surface_stalls = 0
     if surface:
         created.extend(draw_ring(polygon, z, surface))
@@ -323,10 +341,10 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
         self.Padding = drawing.Padding(12)
         self.Resizable = False
         self.site_curve_id = None
-        self.access_points = []
+        self.street_edge = None
 
         self.site_label = make_control(forms.Label, "No site curve selected")
-        self.access_label = make_control(forms.Label, "No access points selected")
+        self.street_label = make_control(forms.Label, "No street edge selected")
         self.required_box = make_control(forms.TextBox, str(DEFAULT_REQUIRED_STALLS))
         self.setback_box = make_control(forms.TextBox, str(DEFAULT_SETBACK))
         self.max_levels_box = make_control(forms.TextBox, str(DEFAULT_MAX_LEVELS))
@@ -334,8 +352,8 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
 
         pick_site = make_control(forms.Button, "Pick Site Curve")
         pick_site.Click += self.on_pick_site
-        pick_access = make_control(forms.Button, "Pick Access Points")
-        pick_access.Click += self.on_pick_access
+        pick_street = make_control(forms.Button, "Pick Street Edge")
+        pick_street.Click += self.on_pick_street
         generate = make_control(forms.Button, "Generate Feasibility Geometry")
         generate.Click += self.on_generate
         close = make_control(forms.Button, "Close")
@@ -344,7 +362,7 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
         layout = forms.DynamicLayout()
         layout.Spacing = drawing.Size(6, 6)
         layout.AddRow(make_control(forms.Label, "Site"), self.site_label, pick_site)
-        layout.AddRow(make_control(forms.Label, "Access"), self.access_label, pick_access)
+        layout.AddRow(make_control(forms.Label, "Street"), self.street_label, pick_street)
         layout.AddRow(make_control(forms.Label, "Required stalls"), self.required_box)
         layout.AddRow(make_control(forms.Label, "Setback"), self.setback_box)
         layout.AddRow(make_control(forms.Label, "Max garage levels"), self.max_levels_box)
@@ -358,21 +376,30 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
         curve_id = rs.GetObject("Select a closed usable site curve", rs.filter.curve, preselect=True)
         if curve_id:
             self.site_curve_id = curve_id
+            self.street_edge = None
             self.site_label.Text = str(curve_id)
+            self.street_label.Text = "No street edge selected"
             self.status_label.Text = "Site curve selected"
 
-    def on_pick_access(self, sender, event):
-        points = rs.GetPoints(True, False, "Pick optional vehicle access points. Press Enter when done.")
-        if points:
-            self.access_points = points
-            self.access_label.Text = "%s point(s)" % len(points)
-            self.status_label.Text = "Access points selected"
+    def on_pick_street(self, sender, event):
+        if not self.site_curve_id:
+            self.status_label.Text = "Pick a site curve first"
+            return
+        polygon, _z = core.boundary_polygon(self.site_curve_id, rs)
+        if not polygon:
+            self.status_label.Text = "Could not read the site curve"
+            return
+        street_edge = pick_street_edge(self.site_curve_id, polygon)
+        if street_edge:
+            self.street_edge = street_edge
+            self.street_label.Text = "%.0f ft frontage" % street_edge["length"]
+            self.status_label.Text = "Street edge selected"
 
     def on_generate(self, sender, event):
         required = safe_int(self.required_box.Text, DEFAULT_REQUIRED_STALLS)
         setback = safe_float(self.setback_box.Text, DEFAULT_SETBACK)
         max_levels = safe_int(self.max_levels_box.Text, DEFAULT_MAX_LEVELS)
-        result = run_feasibility(self.site_curve_id, self.access_points, required, setback, max_levels)
+        result = run_feasibility(self.site_curve_id, self.street_edge, required, setback, max_levels)
         if result:
             self.status_label.Text = result["recommendation"]
 
@@ -385,7 +412,12 @@ def run_prompt_fallback():
     if not curve_id:
         return
 
-    access_points = rs.GetPoints(True, False, "Pick optional vehicle access points. Press Enter when done.") or []
+    polygon, _z = core.boundary_polygon(curve_id, rs)
+    if not polygon:
+        rs.MessageBox("Could not read the selected site curve.", 16, "Parking Feasibility")
+        return
+
+    street_edge = pick_street_edge(curve_id, polygon)
     required = rs.GetInteger("Required parking stalls", DEFAULT_REQUIRED_STALLS, 1)
     if required is None:
         return
@@ -398,7 +430,7 @@ def run_prompt_fallback():
     if max_levels is None:
         return
 
-    result = run_feasibility(curve_id, access_points, required, setback, max_levels)
+    result = run_feasibility(curve_id, street_edge, required, setback, max_levels)
     if result:
         rs.MessageBox(result["recommendation"], 64, "Parking Feasibility")
 

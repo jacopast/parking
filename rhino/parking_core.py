@@ -248,16 +248,93 @@ def angle_key(angle_deg, precision=1.0):
     return round(normalize_angle(angle_deg) / precision) * precision
 
 
-def candidate_orientations(polygon, access_points=None):
-    """Edge-aligned grid directions, weighted by edge length."""
+def nearest_edge_index(polygon, point, max_distance=None):
+    """Return the polygon edge index closest to a world point, or None."""
+    px, py = as_tuple(point)[0], as_tuple(point)[1]
+    best = None
+    count = len(polygon)
+    for index in range(count):
+        ax, ay = polygon[index]
+        bx, by = polygon[(index + 1) % count]
+        distance = distance_to_segment(px, py, ax, ay, bx, by)
+        if best is None or distance < best[0]:
+            best = (distance, index)
+
+    if best is None:
+        return None
+    if max_distance is not None and best[0] > max_distance:
+        return None
+    return best[1]
+
+
+def street_edge_from_pick(polygon, point, max_distance=12.0):
+    """Resolve a pick on/near the boundary to the street-frontage edge.
+
+    Returns dict with index, endpoints a/b, length, and mid point, or None.
+    """
+    index = nearest_edge_index(polygon, point, max_distance)
+    if index is None:
+        # Fall back to nearest edge even if the pick was a bit off the curve.
+        index = nearest_edge_index(polygon, point, None)
+    if index is None:
+        return None
+
+    a = polygon[index]
+    b = polygon[(index + 1) % len(polygon)]
+    length = math.hypot(b[0] - a[0], b[1] - a[1])
+    if length < 1.0:
+        return None
+
+    return {
+        "index": index,
+        "a": a,
+        "b": b,
+        "length": length,
+        "mid": (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])),
+    }
+
+
+def access_points_on_street_edge(street_edge):
+    """Place curb-cut centers along the street edge (entry / exit)."""
+    if not street_edge:
+        return []
+
+    ax, ay = street_edge["a"]
+    bx, by = street_edge["b"]
+    # One-third and two-thirds along the frontage; collapses to mid on short edges.
+    if street_edge["length"] < STALL_WIDTH * 4:
+        return [street_edge["mid"]]
+
+    return [
+        (ax + (bx - ax) / 3.0, ay + (by - ay) / 3.0),
+        (ax + 2.0 * (bx - ax) / 3.0, ay + 2.0 * (by - ay) / 3.0),
+    ]
+
+
+def candidate_orientations(polygon, access_points=None, street_edge=None):
+    """Edge-aligned grid directions, weighted by edge length.
+
+    A designated street-frontage edge is weighted strongly so aisles prefer
+    to run parallel / perpendicular to the public road.
+    """
     weights = {}
 
     def add_angle(angle_deg, weight):
         key = angle_key(angle_deg)
         weights[key] = weights.get(key, 0.0) + weight
 
+    if street_edge:
+        ax, ay = street_edge["a"]
+        bx, by = street_edge["b"]
+        length = street_edge["length"]
+        street_angle = math.degrees(math.atan2(by - ay, bx - ax))
+        # Prefer aisles perpendicular to the street (cars face the road edge)
+        # and keep the street-parallel option as a strong alternate.
+        add_angle(street_angle + 90.0, length * 4.0)
+        add_angle(street_angle, length * 3.0)
+
     access_points = access_points or []
-    if len(access_points) >= 2:
+    if not street_edge and len(access_points) >= 2:
         a = as_tuple(access_points[0])
         b = as_tuple(access_points[1])
         length = math.hypot(b[0] - a[0], b[1] - a[1])
@@ -284,8 +361,8 @@ def candidate_orientations(polygon, access_points=None):
     return [angle for angle, _weight in ranked[:MAX_ORIENTATIONS]]
 
 
-def candidate_angles(polygon, access_points=None):
-    return candidate_orientations(polygon, access_points)
+def candidate_angles(polygon, access_points=None, street_edge=None):
+    return candidate_orientations(polygon, access_points, street_edge)
 
 
 def local_polygon_fits(polygon, basis, points, clearance, edge_midpoints=True):
@@ -897,10 +974,10 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width):
     return best
 
 
-def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs):
+def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs, street_edge=None):
     """Trial-and-error over orientation, orthogonal ring, then offset ring."""
     origin = polygon_centroid(polygon)
-    orientations = candidate_orientations(polygon, access_points)
+    orientations = candidate_orientations(polygon, access_points, street_edge)
     geometries = [module_geometry(angle, flow, stall_width) for angle, flow in park_configs]
     best = None
 
@@ -916,19 +993,24 @@ def _search_layouts(polygon, z, setback, access_points, stall_width, park_config
     return best
 
 
-def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH):
+def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH, street_edge=None):
     """Pack with 90 degree stalls; diagonal only if perpendicular finds nothing."""
+    if street_edge and not access_points:
+        access_points = access_points_on_street_edge(street_edge)
+
     best = _search_layouts(
-        polygon, z, setback, access_points, stall_width, PARK_CONFIGS,
+        polygon, z, setback, access_points, stall_width, PARK_CONFIGS, street_edge,
     )
 
     if best is None:
         best = _search_layouts(
-            polygon, z, setback, access_points, stall_width, DIAGONAL_FALLBACK_CONFIGS,
+            polygon, z, setback, access_points, stall_width, DIAGONAL_FALLBACK_CONFIGS, street_edge,
         )
 
     if best:
         best["ada"] = ada_stall_count(best["stall_count"])
+        if street_edge:
+            best["street_edge"] = street_edge
 
     return best
 
