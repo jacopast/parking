@@ -1,46 +1,46 @@
 using System.Runtime.InteropServices;
-using Eto.Drawing;
-using Eto.Forms;
 using Rhino;
 using Rhino.UI;
+using Drawing = Eto.Drawing;
+using Forms = Eto.Forms;
 
 namespace RhinoPluginParking;
 
 [Guid("01308BBD-506B-4BF5-BD78-95CE641C7FDE")]
-public sealed class ParkingPanel : Eto.Forms.Panel, IPanel
+public sealed class ParkingPanel : Forms.Panel, IPanel
 {
     public static Guid PanelId => typeof(ParkingPanel).GUID;
 
     public ParkingPanel()
     {
-        var title = new Label
+        var title = new Forms.Label
         {
             Text = "Parking Feasibility",
-            Font = SystemFonts.Bold()
+            Font = Drawing.SystemFonts.Bold()
         };
 
-        var description = new Label
+        var description = new Forms.Label
         {
             Text = "Generate fixed 9' x 18' parking layouts with 24' drive aisles.",
-            Wrap = WrapMode.Word
+            Wrap = Forms.WrapMode.Word
         };
 
-        var feasibilityButton = new Button
+        var feasibilityButton = new Forms.Button
         {
             Text = "Open Feasibility Generator"
         };
         feasibilityButton.Click += (_, _) => RunCommand("ParkingFeasibility");
 
-        var layoutButton = new Button
+        var layoutButton = new Forms.Button
         {
             Text = "Run Direct Layout"
         };
         layoutButton.Click += (_, _) => RunCommand("ParkingLayout");
 
-        var layout = new DynamicLayout
+        var layout = new Forms.DynamicLayout
         {
-            Padding = new Padding(12),
-            DefaultSpacing = new Size(8, 8)
+            Padding = new Drawing.Padding(12),
+            DefaultSpacing = new Drawing.Size(8, 8)
         };
         layout.AddRow(title);
         layout.AddRow(description);
