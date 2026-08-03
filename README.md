@@ -134,8 +134,8 @@ The MVP uses fixed assumptions to keep feasibility studies fast and consistent:
 | Parking angle | 90 degrees |
 | Drive aisle | 24 ft |
 | Surface module | double-loaded 18 + 24 + 18 = 60 ft |
-| End spine | 24 ft circulating drive connecting aisle ends |
-| Access links | entrance and exit connect into the spine network |
+| Perimeter rows | stalls back onto the setback line and face the ring drive |
+| Ring drive | continuous 24 ft loop that serves the perimeter rows and every interior aisle |
 | Orientation search | tries access direction, edge directions, and 15-degree steps |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
@@ -143,7 +143,17 @@ The MVP uses fixed assumptions to keep feasibility studies fast and consistent:
 
 The Rhino model should use feet if these values are intended as feet.
 
-Surface layouts only keep complete stall pairs that share a drive aisle, and every aisle must connect into an end spine so cars can reach the far bays from the entrance.
+## How the surface layout is built
+
+1. Hold the setback from the property line.
+2. Place a perimeter stall row backing onto that setback line.
+3. Run a continuous 24 ft ring drive around the site.
+4. Optionally place a second stall row on the inside of the ring, so the ring is served on both sides.
+5. Fill the remaining interior with double-loaded bays, sliding each bay until it fits rather than locking it to a fixed grid.
+6. Add single-loaded bays where only 42 ft of depth remains.
+7. Discard any bay run that is too short to be usable or that cannot reach the ring drive.
+
+The generator compares these plans across candidate orientations and keeps the one with the most stalls. Typical output falls between roughly 320 and 420 square feet per stall depending on how regular the site shape is.
 
 ## Garage feasibility logic
 

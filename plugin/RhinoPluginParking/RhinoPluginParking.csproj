@@ -21,6 +21,9 @@
   </ItemGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="../../rhino/parking_core.py">
+      <LogicalName>RhinoPluginParking.Scripts.parking_core.py</LogicalName>
+    </EmbeddedResource>
     <EmbeddedResource Include="../../rhino/parking_feasibility_panel.py">
       <LogicalName>RhinoPluginParking.Scripts.parking_feasibility_panel.py</LogicalName>
     </EmbeddedResource>

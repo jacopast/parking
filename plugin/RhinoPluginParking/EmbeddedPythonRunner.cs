@@ -11,7 +11,12 @@ internal static class EmbeddedPythonRunner
     {
         try
         {
-            var scriptPath = Extract(scriptFileName);
+            // The scripts share a helper module, so every embedded script is extracted together.
+            var scriptDirectory = ExtractAll();
+            var scriptPath = Path.Combine(scriptDirectory, scriptFileName);
+            if (!File.Exists(scriptPath))
+                throw new InvalidOperationException($"Embedded script not found: {scriptFileName}");
+
             var escapedPath = scriptPath.Replace("\"", "\"\"");
             return RhinoApp.RunScript($"_-RunPythonScript \"{escapedPath}\"", false);
         }
@@ -22,14 +27,9 @@ internal static class EmbeddedPythonRunner
         }
     }
 
-    private static string Extract(string scriptFileName)
+    private static string ExtractAll()
     {
         var assembly = Assembly.GetExecutingAssembly();
-        var resourceName = ResourcePrefix + scriptFileName;
-
-        using var resource = assembly.GetManifestResourceStream(resourceName)
-            ?? throw new InvalidOperationException($"Embedded script not found: {resourceName}");
-
         var version = assembly.GetName().Version?.ToString() ?? "current";
         var scriptDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -37,14 +37,24 @@ internal static class EmbeddedPythonRunner
             version);
         Directory.CreateDirectory(scriptDirectory);
 
-        var scriptPath = Path.Combine(scriptDirectory, scriptFileName);
-        using var memory = new MemoryStream();
-        resource.CopyTo(memory);
-        var embeddedBytes = memory.ToArray();
+        foreach (var resourceName in assembly.GetManifestResourceNames())
+        {
+            if (!resourceName.StartsWith(ResourcePrefix, StringComparison.Ordinal))
+                continue;
 
-        if (!File.Exists(scriptPath) || !File.ReadAllBytes(scriptPath).SequenceEqual(embeddedBytes))
-            File.WriteAllBytes(scriptPath, embeddedBytes);
+            using var resource = assembly.GetManifestResourceStream(resourceName);
+            if (resource is null)
+                continue;
 
-        return scriptPath;
+            using var memory = new MemoryStream();
+            resource.CopyTo(memory);
+            var embeddedBytes = memory.ToArray();
+
+            var scriptPath = Path.Combine(scriptDirectory, resourceName.Substring(ResourcePrefix.Length));
+            if (!File.Exists(scriptPath) || !File.ReadAllBytes(scriptPath).SequenceEqual(embeddedBytes))
+                File.WriteAllBytes(scriptPath, embeddedBytes);
+        }
+
+        return scriptDirectory;
     }
 }

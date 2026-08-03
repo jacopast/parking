@@ -1,21 +1,27 @@
-"""Rhino panel-style parking feasibility generator.
+"""Rhino parking feasibility generator.
 
 Run with Rhino's RunPythonScript command. The script opens a compact dialog
 that lets users pick a usable site curve, optionally pick access points, enter
-the required stall count, and generate schematic surface/garage parking
+the required stall count, and generate schematic surface and garage parking
 geometry in Rhino layers.
 
 This is intentionally a feasibility-level tool:
-- fixed 9 x 18 stalls
-- fixed 24 drive aisles
+- fixed 9 x 18 stalls and 24 ft aisles
+- perimeter ring drive so surface bays are reachable
 - surface parking first
 - garage options only when the surface count is short
 - garage sizing by bay count, footprint, levels, and sf/stall assumptions
 """
 
 import math
+import os
+import sys
 
 import rhinoscriptsyntax as rs
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import parking_core as core
 
 try:
     import Rhino
@@ -27,11 +33,11 @@ except Exception:
     forms = None
 
 
-STALL_WIDTH = 9.0
-STALL_DEPTH = 18.0
-AISLE_WIDTH = 24.0
-DOUBLE_LOADED_MODULE = STALL_DEPTH + AISLE_WIDTH + STALL_DEPTH
-DEFAULT_SETBACK = 6.0
+STALL_WIDTH = core.STALL_WIDTH
+STALL_DEPTH = core.STALL_DEPTH
+AISLE_WIDTH = core.AISLE_WIDTH
+DOUBLE_LOADED_MODULE = core.DOUBLE_LOADED_MODULE
+DEFAULT_SETBACK = 5.0
 DEFAULT_MAX_LEVELS = 5
 DEFAULT_REQUIRED_STALLS = 300
 GARAGE_RAMP_CORE_LOSS = 0.15
@@ -42,7 +48,6 @@ LAYERS = {
     "surface": "Parking Feasibility::Surface",
     "garage": "Parking Feasibility::Garage Options",
     "access": "Parking Feasibility::Access",
-    "stats": "Parking Feasibility::Stats",
 }
 
 
@@ -58,7 +63,6 @@ def setup_layers():
     ensure_layer(LAYERS["surface"], (255, 183, 3))
     ensure_layer(LAYERS["garage"], (61, 90, 128))
     ensure_layer(LAYERS["access"], (17, 138, 178))
-    ensure_layer(LAYERS["stats"], (20, 30, 45))
 
 
 def safe_float(value, fallback):
@@ -82,7 +86,6 @@ def bounding_rect(curve_id):
 
     xs = [point.X for point in box]
     ys = [point.Y for point in box]
-    z = box[0].Z
     return {
         "min_x": min(xs),
         "max_x": max(xs),
@@ -90,21 +93,8 @@ def bounding_rect(curve_id):
         "max_y": max(ys),
         "width": max(xs) - min(xs),
         "depth": max(ys) - min(ys),
-        "z": z,
+        "z": box[0].Z,
     }
-
-
-def point_in_boundary(point, boundary_id):
-    if not boundary_id or not rs.IsCurveClosed(boundary_id):
-        return True
-    return bool(rs.PointInPlanarClosedCurve(point, boundary_id))
-
-
-def polygon_inside_boundary(points, boundary_id):
-    for point in points:
-        if not point_in_boundary(point, boundary_id):
-            return False
-    return True
 
 
 def add_polyline(points, layer, close=True):
@@ -118,13 +108,6 @@ def add_polyline(points, layer, close=True):
     return object_id
 
 
-def add_text(text, point, height, layer):
-    text_id = rs.AddText(text, point, height=height)
-    if text_id:
-        rs.ObjectLayer(text_id, layer)
-    return text_id
-
-
 def rectangle_points(x, y, width, depth, z):
     return [
         (x, y, z),
@@ -132,289 +115,6 @@ def rectangle_points(x, y, width, depth, z):
         (x + width, y + depth, z),
         (x, y + depth, z),
     ]
-
-
-def center_of(points):
-    count = float(len(points))
-    return (
-        sum(point[0] for point in points) / count,
-        sum(point[1] for point in points) / count,
-        sum(point[2] for point in points) / count,
-    )
-
-
-def as_tuple(point):
-    if hasattr(point, "X"):
-        return (point.X, point.Y, point.Z)
-    return (point[0], point[1], point[2] if len(point) > 2 else 0.0)
-
-
-def make_basis(origin_point, angle_deg):
-    origin = as_tuple(origin_point)
-    radians = math.radians(angle_deg)
-    ux = (math.cos(radians), math.sin(radians))
-    uy = (-ux[1], ux[0])
-    return {
-        "origin": origin,
-        "u": ux,
-        "v": uy,
-        "angle": angle_deg,
-        "z": origin[2],
-    }
-
-
-def world_to_local(point, basis):
-    x, y, _ = as_tuple(point)
-    ox, oy, _ = basis["origin"]
-    dx = x - ox
-    dy = y - oy
-    return (
-        dx * basis["u"][0] + dy * basis["u"][1],
-        dx * basis["v"][0] + dy * basis["v"][1],
-        basis["z"],
-    )
-
-
-def local_to_world(point, basis):
-    u, v, _ = as_tuple(point)
-    ox, oy, oz = basis["origin"]
-    return (
-        ox + u * basis["u"][0] + v * basis["v"][0],
-        oy + u * basis["u"][1] + v * basis["v"][1],
-        oz,
-    )
-
-
-def transform_points(points, basis):
-    return [local_to_world(point, basis) for point in points]
-
-
-def sample_curve_points(curve_id, count=96):
-    points = []
-    divided = rs.DivideCurve(curve_id, count, create_points=False)
-    if divided:
-        points.extend(divided)
-    box = rs.BoundingBox(curve_id)
-    if box:
-        points.extend(box)
-    return points
-
-
-def local_bounding_rect(curve_id, basis):
-    points = sample_curve_points(curve_id)
-    if not points:
-        return None
-    local_points = [world_to_local(point, basis) for point in points]
-    us = [point[0] for point in local_points]
-    vs = [point[1] for point in local_points]
-    return {
-        "min_x": min(us),
-        "max_x": max(us),
-        "min_y": min(vs),
-        "max_y": max(vs),
-        "width": max(us) - min(us),
-        "depth": max(vs) - min(vs),
-        "z": basis["z"],
-    }
-
-
-def normalize_angle(angle_deg):
-    value = angle_deg % 180.0
-    if value < 0:
-        value += 180.0
-    return value
-
-
-def candidate_surface_angles(boundary_id, access_points):
-    angles = [0.0, 90.0]
-    if access_points and len(access_points) >= 2:
-        a = as_tuple(access_points[0])
-        b = as_tuple(access_points[1])
-        dx = b[0] - a[0]
-        dy = b[1] - a[1]
-        if abs(dx) + abs(dy) > 0.001:
-            access_angle = math.degrees(math.atan2(dy, dx))
-            angles.extend([access_angle, access_angle + 90.0])
-
-    points = sample_curve_points(boundary_id, 24)
-    for index in range(len(points)):
-        a = as_tuple(points[index])
-        b = as_tuple(points[(index + 1) % len(points)])
-        dx = b[0] - a[0]
-        dy = b[1] - a[1]
-        if abs(dx) + abs(dy) < 1.0:
-            continue
-        edge_angle = math.degrees(math.atan2(dy, dx))
-        angles.extend([edge_angle, edge_angle + 90.0])
-
-    unique = []
-    seen = set()
-    for angle in angles:
-        key = round(normalize_angle(angle), 1)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(key)
-    return unique
-
-
-def drive_band_world(local_rect, basis, boundary_id):
-    left, right, bottom, top, z = local_rect
-    if right - left < 1.0 or top - bottom < 1.0:
-        return None
-    points_local = rectangle_points(left, bottom, right - left, top - bottom, z)
-    points_world = transform_points(points_local, basis)
-    if not polygon_inside_boundary(points_world, boundary_id):
-        return None
-    return points_world
-
-
-def generate_oriented_surface_layout(boundary_id, basis, setback, access_points=None):
-    access_points = access_points or []
-    rect = local_bounding_rect(boundary_id, basis)
-    if not rect:
-        return None
-
-    min_x = rect["min_x"] + setback
-    max_x = rect["max_x"] - setback
-    min_y = rect["min_y"] + setback
-    max_y = rect["max_y"] - setback
-    z = rect["z"]
-    if max_x - min_x < STALL_WIDTH + AISLE_WIDTH or max_y - min_y < DOUBLE_LOADED_MODULE:
-        return None
-
-    if access_points:
-        access_u = world_to_local(access_points[0], basis)[0]
-    else:
-        access_u = min_x
-    mid_u = 0.5 * (min_x + max_x)
-    prefer_left = access_u <= mid_u
-
-    if prefer_left:
-        spine_left, spine_right = min_x, min_x + AISLE_WIDTH
-        park_min_x, park_max_x = min_x + AISLE_WIDTH, max_x
-        spine_side = "left"
-    else:
-        spine_left, spine_right = max_x - AISLE_WIDTH, max_x
-        park_min_x, park_max_x = min_x, max_x - AISLE_WIDTH
-        spine_side = "right"
-
-    if park_max_x - park_min_x < STALL_WIDTH:
-        return None
-
-    stalls = []
-    aisles = []
-    aisle_cells_all = []
-    stripe = 0
-    y = min_y
-
-    while y + DOUBLE_LOADED_MODULE <= max_y + 0.001:
-        aisle_y = y + STALL_DEPTH
-        row_specs = [
-            (y, STALL_DEPTH),
-            (y + STALL_DEPTH + AISLE_WIDTH, STALL_DEPTH),
-        ]
-        aisle_cells = []
-        stripe_stalls = []
-
-        x = park_min_x
-        while x + STALL_WIDTH <= park_max_x + 0.001:
-            aisle_local = rectangle_points(x, aisle_y, STALL_WIDTH, AISLE_WIDTH, z)
-            aisle_world = transform_points(aisle_local, basis)
-            if not polygon_inside_boundary(aisle_world, boundary_id):
-                x += STALL_WIDTH
-                continue
-
-            placed_pair = []
-            valid_pair = True
-            for row_y, row_depth in row_specs:
-                stall_local = rectangle_points(x, row_y, STALL_WIDTH, row_depth, z)
-                stall_world = transform_points(stall_local, basis)
-                if not polygon_inside_boundary(stall_world, boundary_id):
-                    valid_pair = False
-                    break
-                placed_pair.append(stall_world)
-
-            if valid_pair:
-                stripe_stalls.extend(placed_pair)
-                aisle_cells.append((x, x + STALL_WIDTH, aisle_y, aisle_y + AISLE_WIDTH, z))
-
-            x += STALL_WIDTH
-
-        if aisle_cells:
-            merged = []
-            current = None
-            for left, right, bottom, top, aisle_z in aisle_cells:
-                if current is None:
-                    current = [left, right, bottom, top, aisle_z]
-                    continue
-                if abs(left - current[1]) <= 0.001 and abs(bottom - current[2]) <= 0.001 and abs(top - current[3]) <= 0.001:
-                    current[1] = right
-                else:
-                    merged.append(current)
-                    current = [left, right, bottom, top, aisle_z]
-            if current is not None:
-                merged.append(current)
-
-            for left, right, bottom, top, aisle_z in merged:
-                band = drive_band_world((left, right, bottom, top, aisle_z), basis, boundary_id)
-                if band:
-                    aisles.append(band)
-                    aisle_cells_all.append((left, right, bottom, top, aisle_z))
-
-        stalls.extend(stripe_stalls)
-        stripe += 1
-        y = min_y + stripe * DOUBLE_LOADED_MODULE
-
-    if not aisle_cells_all:
-        return None
-
-    aisle_min_y = min(cell[2] for cell in aisle_cells_all)
-    aisle_max_y = max(cell[3] for cell in aisle_cells_all)
-    aisle_min_x = min(cell[0] for cell in aisle_cells_all)
-    aisle_max_x = max(cell[1] for cell in aisle_cells_all)
-
-    if spine_side == "left":
-        spine_rect = (spine_left, max(spine_right, aisle_min_x), aisle_min_y, aisle_max_y, z)
-    else:
-        spine_rect = (min(spine_left, aisle_max_x), spine_right, aisle_min_y, aisle_max_y, z)
-
-    spine_world = drive_band_world(spine_rect, basis, boundary_id)
-    circulation = []
-    if spine_world:
-        circulation.append(spine_world)
-
-    return {
-        "stalls": stalls,
-        "aisles": aisles + circulation,
-        "rect": bounding_rect(boundary_id),
-        "angle": basis["angle"],
-    }
-
-
-def generate_surface_layout(boundary_id, setback, access_points=None):
-    access_points = access_points or []
-    world_rect = bounding_rect(boundary_id)
-    if not world_rect:
-        return {"stalls": [], "aisles": [], "rect": None, "angle": 0.0}
-
-    if access_points:
-        origin = as_tuple(access_points[0])
-    else:
-        origin = (world_rect["min_x"], world_rect["min_y"], world_rect["z"])
-
-    best = None
-    for angle in candidate_surface_angles(boundary_id, access_points):
-        basis = make_basis(origin, angle)
-        layout = generate_oriented_surface_layout(boundary_id, basis, setback, access_points)
-        if not layout:
-            continue
-        if best is None or len(layout["stalls"]) > len(best["stalls"]):
-            best = layout
-
-    if best is None:
-        return {"stalls": [], "aisles": [], "rect": world_rect, "angle": 0.0}
-    return best
 
 
 def garage_capacity(length, bay_count):
@@ -437,13 +137,13 @@ def garage_footprint_points(rect, setback, bay_count, orientation, target_stalls
     if module_depth > available_depth or available_length < STALL_WIDTH * 4:
         return None
 
-    min_length_for_max_levels = math.ceil(float(target_stalls) / max(max_levels, 1) / max(2 * bay_count, 1) / (1.0 - GARAGE_RAMP_CORE_LOSS)) * STALL_WIDTH
+    min_length_for_max_levels = math.ceil(
+        float(target_stalls) / max(max_levels, 1) / max(2 * bay_count, 1) / (1.0 - GARAGE_RAMP_CORE_LOSS)
+    ) * STALL_WIDTH
     length = min(max(72.0, min_length_for_max_levels), available_length)
     stalls_per_level = garage_capacity(length, bay_count)
-    levels = int(math.ceil(float(target_stalls) / max(stalls_per_level, 1)))
-    levels = max(levels, 1)
+    levels = max(int(math.ceil(float(target_stalls) / max(stalls_per_level, 1))), 1)
     total_stalls = stalls_per_level * levels
-    fits_levels = levels <= max_levels
 
     x = rect["min_x"] + setback
     y = rect["min_y"] + setback
@@ -451,25 +151,20 @@ def garage_footprint_points(rect, setback, bay_count, orientation, target_stalls
 
     if orientation == "horizontal":
         footprint = rectangle_points(x, y, length, module_depth, z)
-        draw_length = length
-        draw_depth = module_depth
     else:
         footprint = rectangle_points(x, y, module_depth, length, z)
-        draw_length = length
-        draw_depth = module_depth
 
     return {
         "bay_count": bay_count,
         "orientation": orientation,
         "footprint": footprint,
-        "length": draw_length,
-        "depth": draw_depth,
+        "length": length,
+        "depth": module_depth,
         "levels": levels,
-        "fits_levels": fits_levels,
+        "fits_levels": levels <= max_levels,
         "stalls_per_level": stalls_per_level,
         "total_stalls": total_stalls,
-        "gross_area": draw_length * draw_depth * levels,
-        "sf_per_stall": (draw_length * draw_depth * levels) / max(total_stalls, 1),
+        "sf_per_stall": (length * module_depth * levels) / max(total_stalls, 1),
     }
 
 
@@ -493,6 +188,23 @@ def generate_garage_options(rect, setback, deficit, max_levels):
     return options[:3]
 
 
+def draw_ring(polygon, z, layout):
+    created = []
+    outer, inner = core.ring_band_points(polygon, z, layout["ring_outer"], layout["ring_inner"])
+
+    for band in (outer, inner):
+        if not band:
+            continue
+        valid = [point for point in band if core.point_inside(polygon, point[0], point[1])]
+        if len(valid) < 3:
+            continue
+        object_id = add_polyline(valid, LAYERS["access"])
+        if object_id:
+            created.append(object_id)
+
+    return created
+
+
 def draw_surface(layout):
     created = []
     for aisle in layout["aisles"]:
@@ -506,35 +218,32 @@ def draw_surface(layout):
     return created
 
 
-def draw_garage_option(option, index, base_y_offset):
-    created = []
+def draw_garage_option(option, base_y_offset):
     footprint = [(p[0], p[1] + base_y_offset, p[2]) for p in option["footprint"]]
     object_id = add_polyline(footprint, LAYERS["garage"])
-    if object_id:
-        created.append(object_id)
-    return created
+    return [object_id] if object_id else []
 
 
-def draw_access(access_points):
+def draw_access(access_points, z):
     created = []
     for point in access_points:
-        circle = rs.AddCircle(point, 4.0)
+        access = core.as_tuple(point)
+        marker_plane = rs.PlaneFromNormal((access[0], access[1], z), (0, 0, 1))
+        circle = rs.AddCircle(marker_plane, 4.0)
         if circle:
             rs.ObjectLayer(circle, LAYERS["access"])
             created.append(circle)
-
-    if len(access_points) >= 2:
-        line = rs.AddLine(access_points[0], access_points[1])
-        if line:
-            rs.ObjectLayer(line, LAYERS["access"])
-            created.append(line)
-
     return created
 
 
 def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_levels):
     if not site_curve_id:
         rs.MessageBox("Select a site curve before generating options.", 48, "Parking Feasibility")
+        return None
+
+    polygon, z = core.boundary_polygon(site_curve_id, rs)
+    if not polygon:
+        rs.MessageBox("Could not read the selected site curve.", 16, "Parking Feasibility")
         return None
 
     setup_layers()
@@ -545,31 +254,33 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
         rs.ObjectLayer(site_copy, LAYERS["site"])
         created.append(site_copy)
 
-    created.extend(draw_access(access_points))
+    created.extend(draw_access(access_points, z))
 
-    surface = generate_surface_layout(site_curve_id, setback, access_points)
-    created.extend(draw_surface(surface))
+    surface = core.best_layout(polygon, z, setback, access_points)
+    surface_stalls = 0
+    if surface:
+        created.extend(draw_ring(polygon, z, surface))
+        created.extend(draw_surface(surface))
+        surface_stalls = surface["stall_count"]
 
-    surface_stalls = len(surface["stalls"])
+    rect = bounding_rect(site_curve_id)
     deficit = max(required_stalls - surface_stalls, 0)
-    garage_options = generate_garage_options(surface["rect"], setback, deficit, max_levels)
+    garage_options = generate_garage_options(rect, setback, deficit, max_levels)
 
-    base_offset = 0.0
-    if surface["rect"]:
-        base_offset = surface["rect"]["depth"] + AISLE_WIDTH * 2.0
-
+    base_offset = rect["depth"] + AISLE_WIDTH * 2.0 if rect else 0.0
     for index, option in enumerate(garage_options):
-        created.extend(draw_garage_option(option, index, base_offset * (index + 1)))
+        created.extend(draw_garage_option(option, base_offset * (index + 1)))
 
-    recommendation = "Surface parking is sufficient."
+    recommendation = "Surface parking is sufficient with %s stalls." % surface_stalls
     if deficit > 0 and garage_options:
         best = garage_options[0]
-        recommendation = "Garage required: use %s levels for approximately %s stalls." % (
+        recommendation = "Surface %s stalls. Garage needed: %s levels for about %s stalls." % (
+            surface_stalls,
             best["levels"],
             best["total_stalls"],
         )
     elif deficit > 0:
-        recommendation = "Garage required, but no schematic option fits the current limits."
+        recommendation = "Surface %s stalls. Garage needed, but no option fits the current limits." % surface_stalls
 
     if created:
         group = rs.AddGroup("Parking Feasibility")
