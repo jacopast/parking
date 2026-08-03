@@ -189,10 +189,17 @@ def main():
     layout = draw_layout(boundary_id, entry_point, exit_point, setback)
     if layout:
         rs.MessageBox(
-            "Stalls: %s\nBay runs: %s\nAisle orientation: %.0f degrees" % (
+            "Stalls: %s (%s on the perimeter)\n"
+            "Parking: %s degree %s bays\n"
+            "Aisle orientation: %.0f degrees\n"
+            "Accessible stalls required: %s including %s van" % (
                 layout["stall_count"],
-                layout["run_count"],
+                layout["perimeter_stalls"],
+                layout["park_angle"],
+                layout["flow"],
                 layout["angle"],
+                layout["ada"]["accessible"],
+                layout["ada"]["van"],
             ),
             64,
             "Parking Layout",

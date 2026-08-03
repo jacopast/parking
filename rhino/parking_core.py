@@ -1,28 +1,114 @@
 """Shared surface parking layout logic for the Rhino parking tools.
 
-The generator follows normal surface parking practice:
+Dimensions follow published parking geometrics rather than ad-hoc numbers.
+The module table below reproduces Iowa SUDAS Design Manual 8B-1 Table
+8B-1.02, which is adapted from ULI / NPA "The Dimensions of Parking":
+
+    https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf
+
+The relationships used here are the standard closed forms:
+
+    WP (stall width along the aisle) = stall width / sin(angle)
+    SP (stall projection, row depth) = stall stripe length * sin(angle)
+    M1 (double-loaded module)        = 2 * SP + aisle
+    M2 (single-loaded module)        = SP + aisle
+    interlock reduction              = stall width * cos(angle) / 2
+
+The layout pipeline is the same offset-and-stripe approach used by the
+open-source parking generators (Feasibility, BarnacleParking, ParkSolver):
 
 1. hold a setback from the property line
-2. run a continuous perimeter ring drive inside that setback
-3. fill only the region inside the ring with double-loaded bays
-   (18 ft stall + 24 ft aisle + 18 ft stall)
-4. keep a bay run only when it is long enough to be usable, so every
-   aisle ends on the ring drive at both ends
+2. place perimeter stall rows that back onto the setback line
+3. run a continuous perimeter ring drive that serves those rows
+4. stripe the remaining interior with parking modules
+5. discard bay runs that are too short or cannot reach the ring
 
-Because parking is limited to the region inside the ring, every aisle
-reaches the ring, and the ring reaches the entrance and exit.
+Because interior parking is limited to the region inside the ring, every
+aisle reaches the ring, and the ring reaches the entrance and exit.
 """
 
 import math
 
 
 STALL_WIDTH = 9.0
-STALL_DEPTH = 18.0
+STALL_STRIPE = 18.0
+STALL_DEPTH = STALL_STRIPE
 AISLE_WIDTH = 24.0
-DOUBLE_LOADED_MODULE = STALL_DEPTH + AISLE_WIDTH + STALL_DEPTH
+DOUBLE_LOADED_MODULE = 2 * STALL_STRIPE + AISLE_WIDTH
 RING_WIDTH = 24.0
 MIN_RUN_COLUMNS = 3
-ANGLE_STEP_DEG = 15.0
+# Edge-aligned directions dominate in practice, so the sweep is only a
+# fallback for sites with no long straight edge.
+ANGLE_STEP_DEG = 45.0
+
+# Aisle width in feet by park angle and traffic flow, from Iowa SUDAS
+# Table 8B-1.02. Angles outside this table are not generated because
+# 76 to 89 degrees lets drivers back out and leave the wrong way.
+AISLE_WIDTHS = {
+    (90, "two-way"): 24.0,
+    (60, "two-way"): 25.833,
+    (60, "one-way"): 20.333,
+    (45, "two-way"): 29.667,
+    (45, "one-way"): 21.5,
+}
+
+PARK_CONFIGS = [
+    (90, "two-way"),
+    (60, "one-way"),
+    (60, "two-way"),
+    (45, "one-way"),
+    (45, "two-way"),
+]
+
+# Chrest, "Parking Structures", flags layouts above this as inefficient.
+EFFICIENCY_TARGET_SF_PER_STALL = 330.0
+
+
+def module_geometry(park_angle, flow, stall_width=STALL_WIDTH):
+    """Return the standard module dimensions for one park angle."""
+    radians = math.radians(park_angle)
+    sin_a = math.sin(radians)
+    cos_a = math.cos(radians)
+    row_depth = STALL_STRIPE * sin_a
+    aisle = AISLE_WIDTHS[(park_angle, flow)]
+
+    return {
+        "park_angle": park_angle,
+        "flow": flow,
+        "stall_width": stall_width,
+        "row_depth": row_depth,
+        "aisle": aisle,
+        "stall_pitch": stall_width / sin_a,
+        "interlock": stall_width * cos_a / 2.0,
+        "double_module": 2.0 * row_depth + aisle,
+        "single_module": row_depth + aisle,
+        "lean": (-cos_a, sin_a),
+    }
+
+
+def ada_stall_count(total_stalls):
+    """Accessible stall counts from the 2010 ADA Standards Table 208.2."""
+    if total_stalls <= 0:
+        return {"accessible": 0, "van": 0}
+
+    thresholds = [
+        (25, 1), (50, 2), (75, 3), (100, 4), (150, 5),
+        (200, 6), (300, 7), (400, 8), (500, 9),
+    ]
+
+    accessible = None
+    for limit, count in thresholds:
+        if total_stalls <= limit:
+            accessible = count
+            break
+
+    if accessible is None:
+        if total_stalls <= 1000:
+            accessible = int(math.ceil(total_stalls * 0.02))
+        else:
+            accessible = 20 + int(math.ceil((total_stalls - 1000) / 100.0))
+
+    return {"accessible": accessible, "van": int(math.ceil(accessible / 6.0))}
 
 
 def as_tuple(point):
@@ -172,17 +258,40 @@ def candidate_angles(polygon, access_points=None):
     return unique
 
 
-def block_fits(polygon, basis, u0, v0, width, depth, clearance):
-    """Test a local-space rectangle against the buildable region."""
-    steps = max(int(math.ceil(depth / 6.0)), 2)
-    for column in (0.0, 0.5, 1.0):
-        u = u0 + width * column
-        for step in range(steps + 1):
-            v = v0 + depth * (float(step) / steps)
-            x, y = to_world(basis, u, v)
-            if not has_clearance(polygon, x, y, clearance):
-                return False
+def local_polygon_fits(polygon, basis, points, clearance, edge_midpoints=True):
+    """Test a local-space convex shape against the buildable region."""
+    count = len(points)
+    samples = list(points)
+    if edge_midpoints:
+        for index in range(count):
+            au, av = points[index]
+            bu, bv = points[(index + 1) % count]
+            samples.append((0.5 * (au + bu), 0.5 * (av + bv)))
+    samples.append((
+        sum(point[0] for point in points) / count,
+        sum(point[1] for point in points) / count,
+    ))
+
+    for u, v in samples:
+        x, y = to_world(basis, u, v)
+        if not has_clearance(polygon, x, y, clearance):
+            return False
     return True
+
+
+def stall_shape(u, front_v, geometry, lean_sign):
+    """Stall outline as a parallelogram leaning at the park angle."""
+    pitch = geometry["stall_pitch"]
+    lean_u, lean_v = geometry["lean"]
+    back_u = lean_u * STALL_STRIPE
+    back_v = lean_v * STALL_STRIPE * lean_sign
+
+    return [
+        (u, front_v),
+        (u + pitch, front_v),
+        (u + pitch + back_u, front_v + back_v),
+        (u + back_u, front_v + back_v),
+    ]
 
 
 def rectangle_world(basis, u0, v0, width, depth, z):
@@ -201,45 +310,47 @@ def touches_ring(polygon, basis, u, v0, depth, clearance):
         x, y = to_world(basis, u, v0 + depth * step)
         if not point_inside(polygon, x, y):
             return True
-        if distance_to_polygon(polygon, x, y) <= clearance + STALL_WIDTH * 1.5:
+        if distance_to_polygon(polygon, x, y) <= clearance + STALL_WIDTH * 2.0:
             return True
     return False
 
 
-def stripe_runs(polygon, basis, v, depth, clearance, min_u, max_u):
-    """Find contiguous 9 ft column runs where a full bay depth fits."""
+def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u):
+    """Test each stall pitch across one bay and return the shapes that fit."""
+    pitch = geometry["stall_pitch"]
+    row_depth = geometry["row_depth"]
+    aisle = geometry["aisle"]
+
     columns = []
     u = min_u
-    while u + STALL_WIDTH <= max_u + 0.001:
-        columns.append((u, block_fits(polygon, basis, u, v, STALL_WIDTH, depth, clearance)))
-        u += STALL_WIDTH
+    while u + pitch <= max_u + 0.001:
+        shapes = [stall_shape(u, v + row_depth, geometry, -1.0)]
+        if rows == 2:
+            shapes.append(stall_shape(u, v + row_depth + aisle, geometry, 1.0))
 
-    runs = []
-    run_start = None
-    for index in range(len(columns) + 1):
-        fits = columns[index][1] if index < len(columns) else False
-        if fits and run_start is None:
-            run_start = index
-        elif not fits and run_start is not None:
-            length = index - run_start
-            left_u = columns[run_start][0]
-            right_u = left_u + length * STALL_WIDTH
-            connected = (
-                touches_ring(polygon, basis, left_u, v, depth, clearance)
-                or touches_ring(polygon, basis, right_u, v, depth, clearance)
-            )
-            if length >= MIN_RUN_COLUMNS and connected:
-                runs.append((left_u, length))
-            run_start = None
+        aisle_cell = [
+            (u, v + row_depth),
+            (u + pitch, v + row_depth),
+            (u + pitch, v + row_depth + aisle),
+            (u, v + row_depth + aisle),
+        ]
 
-    return runs
+        fits = local_polygon_fits(polygon, basis, aisle_cell, clearance)
+        if fits:
+            for shape in shapes:
+                if not local_polygon_fits(polygon, basis, shape, clearance, False):
+                    fits = False
+                    break
+
+        columns.append((u, fits, shapes))
+        u += pitch
+
+    return columns
 
 
-def layout_for_angle(polygon, basis, clearance, z):
-    """Fill the region inside the perimeter ring with parking bays."""
+def layout_for_angle(polygon, basis, clearance, z, geometry):
+    """Stripe the region inside the perimeter ring with parking modules."""
     min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
-
-    single_loaded_depth = STALL_DEPTH + AISLE_WIDTH
     slide_step = 3.0
 
     stalls = []
@@ -247,42 +358,62 @@ def layout_for_angle(polygon, basis, clearance, z):
     run_count = 0
     v = min_v
 
-    while v + single_loaded_depth <= max_v + 0.001:
+    while v + geometry["single_module"] <= max_v + 0.001:
         placed_depth = None
 
-        for depth, rows in ((DOUBLE_LOADED_MODULE, 2), (single_loaded_depth, 1)):
+        for depth, rows in (
+            (geometry["double_module"], 2),
+            (geometry["single_module"], 1),
+        ):
             if v + depth > max_v + 0.001:
                 continue
 
-            runs = stripe_runs(polygon, basis, v, depth, clearance, min_u, max_u)
-            if not runs:
-                continue
+            columns = bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u)
+            runs = []
+            run_start = None
+            for index in range(len(columns) + 1):
+                fits = columns[index][1] if index < len(columns) else False
+                if fits and run_start is None:
+                    run_start = index
+                elif not fits and run_start is not None:
+                    runs.append((run_start, index))
+                    run_start = None
 
-            for left_u, length in runs:
-                for column in range(length):
-                    column_u = left_u + column * STALL_WIDTH
-                    stalls.append(rectangle_world(basis, column_u, v, STALL_WIDTH, STALL_DEPTH, z))
-                    if rows == 2:
-                        stalls.append(rectangle_world(
-                            basis,
-                            column_u,
-                            v + STALL_DEPTH + AISLE_WIDTH,
-                            STALL_WIDTH,
-                            STALL_DEPTH,
-                            z,
-                        ))
+            placed_any = False
+            for start, end in runs:
+                if end - start < MIN_RUN_COLUMNS:
+                    continue
+
+                left_u = columns[start][0]
+                right_u = columns[end - 1][0] + geometry["stall_pitch"]
+                connected = (
+                    touches_ring(polygon, basis, left_u, v, depth, clearance)
+                    or touches_ring(polygon, basis, right_u, v, depth, clearance)
+                )
+                if not connected:
+                    continue
+
+                for index in range(start, end):
+                    for shape in columns[index][2]:
+                        stalls.append([
+                            (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
+                            for su, sv in shape
+                        ])
+
                 aisles.append(rectangle_world(
                     basis,
                     left_u,
-                    v + STALL_DEPTH,
-                    length * STALL_WIDTH,
-                    AISLE_WIDTH,
+                    v + geometry["row_depth"],
+                    right_u - left_u,
+                    geometry["aisle"],
                     z,
                 ))
                 run_count += 1
+                placed_any = True
 
-            placed_depth = depth
-            break
+            if placed_any:
+                placed_depth = depth
+                break
 
         # Slide upward until a bay fits so bays are not locked to a fixed grid.
         v += placed_depth if placed_depth else slide_step
@@ -296,6 +427,8 @@ def layout_for_angle(polygon, basis, clearance, z):
         "stall_count": len(stalls),
         "run_count": run_count,
         "angle": basis["angle"],
+        "park_angle": geometry["park_angle"],
+        "flow": geometry["flow"],
     }
 
 
@@ -320,8 +453,8 @@ def convex_overlap(poly_a, poly_b):
     return True
 
 
-def perimeter_row(polygon, z, base_offset, placed=None):
-    """Place a ring of stalls whose backs sit on the given offset line."""
+def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH):
+    """Place a ring of 90 degree stalls backing onto the given offset line."""
     stalls = []
     placed = placed if placed is not None else []
     count = len(polygon)
@@ -330,7 +463,7 @@ def perimeter_row(polygon, z, base_offset, placed=None):
         ax, ay = polygon[index]
         bx, by = polygon[(index + 1) % count]
         edge_length = math.hypot(bx - ax, by - ay)
-        if edge_length < STALL_WIDTH * 2:
+        if edge_length < stall_width * 2:
             continue
 
         dx = (bx - ax) / edge_length
@@ -341,18 +474,18 @@ def perimeter_row(polygon, z, base_offset, placed=None):
         if not point_inside(polygon, mid_x + nx, mid_y + ny):
             nx, ny = -nx, -ny
 
-        stall_count = int((edge_length - 0.001) / STALL_WIDTH)
-        margin = (edge_length - stall_count * STALL_WIDTH) * 0.5
+        stall_count = int((edge_length - 0.001) / stall_width)
+        margin = (edge_length - stall_count * stall_width) * 0.5
 
         for slot in range(stall_count):
-            t = margin + slot * STALL_WIDTH
+            t = margin + slot * stall_width
             base_x = ax + dx * t + nx * base_offset
             base_y = ay + dy * t + ny * base_offset
             corners = [
                 (base_x, base_y),
-                (base_x + dx * STALL_WIDTH, base_y + dy * STALL_WIDTH),
-                (base_x + dx * STALL_WIDTH + nx * STALL_DEPTH, base_y + dy * STALL_WIDTH + ny * STALL_DEPTH),
-                (base_x + nx * STALL_DEPTH, base_y + ny * STALL_DEPTH),
+                (base_x + dx * stall_width, base_y + dy * stall_width),
+                (base_x + dx * stall_width + nx * STALL_STRIPE, base_y + dy * stall_width + ny * STALL_STRIPE),
+                (base_x + nx * STALL_STRIPE, base_y + ny * STALL_STRIPE),
             ]
 
             usable = True
@@ -372,18 +505,18 @@ def perimeter_row(polygon, z, base_offset, placed=None):
     return stalls, placed
 
 
-def build_variants(polygon, z, setback):
+def build_variants(polygon, z, setback, stall_width=STALL_WIDTH):
     """Plan options that differ in how many stall rows the ring drive serves."""
-    outer_row, placed = perimeter_row(polygon, z, setback)
-    ring_outer = setback + STALL_DEPTH
-    inner_row, _ = perimeter_row(polygon, z, ring_outer + RING_WIDTH, list(placed))
+    outer_row, placed = perimeter_row(polygon, z, setback, None, stall_width)
+    ring_outer = setback + STALL_STRIPE
+    inner_row, _ = perimeter_row(polygon, z, ring_outer + RING_WIDTH, list(placed), stall_width)
 
     variants = []
     if outer_row and inner_row:
         variants.append((
             outer_row + inner_row,
             ring_outer,
-            ring_outer + RING_WIDTH + STALL_DEPTH,
+            ring_outer + RING_WIDTH + STALL_STRIPE,
         ))
     if outer_row:
         variants.append((outer_row, ring_outer, ring_outer + RING_WIDTH))
@@ -391,37 +524,42 @@ def build_variants(polygon, z, setback):
     return variants
 
 
-def best_layout(polygon, z, setback, access_points=None):
+def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH):
     origin = polygon[0]
     angles = candidate_angles(polygon, access_points)
+    geometries = [module_geometry(angle, flow, stall_width) for angle, flow in PARK_CONFIGS]
     best = None
 
-    for perimeter_stalls, ring_outer, clearance in build_variants(polygon, z, setback):
+    for perimeter_stalls, ring_outer, clearance in build_variants(polygon, z, setback, stall_width):
         for angle in angles:
             basis = make_basis(origin, angle)
-            interior = layout_for_angle(polygon, basis, clearance, z)
-            interior_stalls = interior["stalls"] if interior else []
 
-            total = len(perimeter_stalls) + len(interior_stalls)
-            if total == 0:
-                break
+            for geometry in geometries:
+                interior = layout_for_angle(polygon, basis, clearance, z, geometry)
+                interior_stalls = interior["stalls"] if interior else []
 
-            candidate = {
-                "stalls": perimeter_stalls + interior_stalls,
-                "aisles": interior["aisles"] if interior else [],
-                "stall_count": total,
-                "run_count": interior["run_count"] if interior else 0,
-                "angle": interior["angle"] if interior else 0.0,
-                "ring_outer": ring_outer,
-                "ring_inner": ring_outer + RING_WIDTH,
-                "perimeter_stalls": len(perimeter_stalls),
-            }
+                total = len(perimeter_stalls) + len(interior_stalls)
+                if total == 0:
+                    continue
 
-            if best is None or candidate["stall_count"] > best["stall_count"]:
-                best = candidate
+                candidate = {
+                    "stalls": perimeter_stalls + interior_stalls,
+                    "aisles": interior["aisles"] if interior else [],
+                    "stall_count": total,
+                    "run_count": interior["run_count"] if interior else 0,
+                    "angle": interior["angle"] if interior else 0.0,
+                    "park_angle": interior["park_angle"] if interior else 90,
+                    "flow": interior["flow"] if interior else "two-way",
+                    "ring_outer": ring_outer,
+                    "ring_inner": ring_outer + RING_WIDTH,
+                    "perimeter_stalls": len(perimeter_stalls),
+                }
 
-            if not interior:
-                break
+                if best is None or candidate["stall_count"] > best["stall_count"]:
+                    best = candidate
+
+    if best:
+        best["ada"] = ada_stall_count(best["stall_count"])
 
     return best
 

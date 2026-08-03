@@ -124,36 +124,69 @@ Parking Layout::Circulation
 Parking Layout::Labels
 ```
 
-## Design assumptions
+## Design basis
 
-The MVP uses fixed assumptions to keep feasibility studies fast and consistent:
+Dimensions are not invented for this project. The module table in `rhino/parking_core.py` reproduces [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), which is adapted from ULI and NPA, *The Dimensions of Parking*.
+
+| Park angle | Flow | Stall projection | Aisle | Double-loaded module | Stall pitch along aisle | Interlock |
+| --- | --- | --- | --- | --- | --- | --- |
+| 90 | two-way | 18 ft | 24 ft | 60 ft | 9 ft | 0 |
+| 60 | one-way | 15 ft 7 in | 20 ft 4 in | 51 ft 6 in | 10 ft 5 in | 2 ft 3 in |
+| 60 | two-way | 15 ft 7 in | 25 ft 10 in | 57 ft | 10 ft 5 in | 2 ft 3 in |
+| 45 | one-way | 12 ft 9 in | 21 ft 6 in | 47 ft | 12 ft 9 in | 3 ft 2 in |
+| 45 | two-way | 12 ft 9 in | 29 ft 8 in | 55 ft 2 in | 12 ft 9 in | 3 ft 2 in |
+
+The generator derives these from the standard closed forms rather than interpolating a table:
+
+```text
+stall pitch along aisle = stall width / sin(angle)
+stall projection        = stall stripe length * sin(angle)
+double-loaded module    = 2 * stall projection + aisle
+single-loaded module    = stall projection + aisle
+interlock reduction     = stall width * cos(angle) / 2
+```
+
+Angles between 76 and 89 degrees are never generated, because they let drivers of small cars back out and leave the wrong way.
+
+Accessible stall counts come from the [2010 ADA Standards, Table 208.2](https://www.access-board.gov/ada/#ada-208), with one van accessible stall per six accessible stalls.
 
 | Item | Value |
 | --- | --- |
-| Stall size | 9 ft x 18 ft |
-| Parking angle | 90 degrees |
-| Drive aisle | 24 ft |
-| Surface module | double-loaded 18 + 24 + 18 = 60 ft |
-| Perimeter rows | stalls back onto the setback line and face the ring drive |
-| Ring drive | continuous 24 ft loop that serves the perimeter rows and every interior aisle |
-| Orientation search | tries access direction, edge directions, and 15-degree steps |
+| Stall width | 9 ft |
+| Stall stripe length | 18 ft |
+| Ring drive | 24 ft |
+| Efficiency target | 330 square feet per stall or better |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
 | Geometry type | 2D schematic curves only, no model text labels |
 
-The Rhino model should use feet if these values are intended as feet.
+The Rhino model should use feet.
 
 ## How the surface layout is built
+
+The pipeline is the offset-and-stripe approach that the open-source parking generators converge on:
 
 1. Hold the setback from the property line.
 2. Place a perimeter stall row backing onto that setback line.
 3. Run a continuous 24 ft ring drive around the site.
-4. Optionally place a second stall row on the inside of the ring, so the ring is served on both sides.
-5. Fill the remaining interior with double-loaded bays, sliding each bay until it fits rather than locking it to a fixed grid.
-6. Add single-loaded bays where only 42 ft of depth remains.
+4. Place a second stall row on the inside of the ring when the site is deep enough, so the ring is served on both sides.
+5. Stripe the remaining interior with parking modules, sliding each bay until it fits rather than locking it to a fixed grid.
+6. Fall back to single-loaded bays where only one stall row plus an aisle fits.
 7. Discard any bay run that is too short to be usable or that cannot reach the ring drive.
 
-The generator compares these plans across candidate orientations and keeps the one with the most stalls. Typical output falls between roughly 320 and 420 square feet per stall depending on how regular the site shape is.
+The generator searches candidate orientations against each park angle and keeps the plan with the most stalls. On regular sites it lands near 300 square feet per stall; on awkward shapes it degrades to roughly 420.
+
+Ninety degree two-way parking usually wins this search. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf), which found that 90 degree stalls in long aisles pack most efficiently. Angled bays only pay off with interlocked bays and one-way circulation, which this version does not yet generate.
+
+## Prior work reviewed
+
+The layout logic follows these rather than starting from scratch:
+
+- [thelandlord92/Feasibility](https://github.com/thelandlord92/Feasibility) (MIT): perimeter versus internal bay split, pattern set-out lines, fillet radii on the internal offset.
+- [zhihengjiao/BarnacleParking](https://github.com/zhihengjiao/BarnacleParking): row-sequence solver and computed module table for a Grasshopper plugin.
+- [badapinguino/parking-lot-algorithm](https://github.com/badapinguino/parking-lot-algorithm): the cleanest derivation of stall pitch, row depth, and the angled row run-out.
+- [ucalyptus/ParkSolver](https://github.com/ucalyptus/ParkSolver) (MIT): edge-aligned candidate angle generation and stripe sweep structure.
+- [ESGI 91, Optimisation of Car Park Designs](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf) (Arup): names the method "tile and trim" and shows the problem is a bin-packing variant.
 
 ## Garage feasibility logic
 

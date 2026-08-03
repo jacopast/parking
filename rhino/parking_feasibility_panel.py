@@ -271,6 +271,9 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
     for index, option in enumerate(garage_options):
         created.extend(draw_garage_option(option, base_offset * (index + 1)))
 
+    ada = core.ada_stall_count(max(surface_stalls, required_stalls))
+    accessible_note = " ADA: %s accessible including %s van." % (ada["accessible"], ada["van"])
+
     recommendation = "Surface parking is sufficient with %s stalls." % surface_stalls
     if deficit > 0 and garage_options:
         best = garage_options[0]
@@ -281,6 +284,8 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
         )
     elif deficit > 0:
         recommendation = "Surface %s stalls. Garage needed, but no option fits the current limits." % surface_stalls
+
+    recommendation += accessible_note
 
     if created:
         group = rs.AddGroup("Parking Feasibility")
