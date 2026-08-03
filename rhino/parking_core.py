@@ -34,8 +34,9 @@ STALL_DEPTH = STALL_STRIPE
 AISLE_WIDTH = 24.0
 DOUBLE_LOADED_MODULE = 2 * STALL_STRIPE + AISLE_WIDTH
 RING_WIDTH = 24.0
-MIN_RUN_COLUMNS = 3
-MIN_CORE_SPAN = 40.0
+MIN_RUN_COLUMNS = 2
+MIN_CORE_SPAN = 36.0
+DRIVEWAY_CLEAR = 28.0
 
 AISLE_WIDTHS = {
     (90, "two-way"): 24.0,
@@ -59,8 +60,8 @@ DIAGONAL_FALLBACK_CONFIGS = [
 EFFICIENCY_TARGET_SF_PER_STALL = 330.0
 
 # Trial-and-error resolution for lattice phase and ortho ring nudges.
-V_PHASE_STEPS = 4
-U_PHASE_STEPS = 3
+V_PHASE_STEPS = 5
+U_PHASE_STEPS = 4
 RING_SHIFT_STEPS = 3
 MAX_ORIENTATIONS = 8
 
@@ -530,6 +531,40 @@ def touches_ring(polygon, basis, u, v0, depth, clearance):
     return False
 
 
+def aisle_slice_fits(polygon, basis, u0, u1, v_aisle, aisle_depth, clearance):
+    """Test a short aisle segment so runs can be extended to the ring."""
+    mid_u = 0.5 * (u0 + u1)
+    samples = [
+        (u0, v_aisle), (u1, v_aisle),
+        (u0, v_aisle + aisle_depth), (u1, v_aisle + aisle_depth),
+        (mid_u, v_aisle + 0.5 * aisle_depth),
+    ]
+    for u, v in samples:
+        x, y = to_world(basis, u, v)
+        if not has_clearance(polygon, x, y, clearance):
+            return False
+    return True
+
+
+def extend_aisle_to_ring(polygon, basis, left_u, right_u, v_aisle, aisle_depth, clearance, min_u, max_u):
+    """Grow aisle ends until they meet the ring / buildable edge."""
+    step = 3.0
+    u = left_u
+    while u - step >= min_u - 0.001:
+        if not aisle_slice_fits(polygon, basis, u - step, u, v_aisle, aisle_depth, clearance):
+            break
+        u -= step
+    new_left = u
+
+    u = right_u
+    while u + step <= max_u + 0.001:
+        if not aisle_slice_fits(polygon, basis, u, u + step, v_aisle, aisle_depth, clearance):
+            break
+        u += step
+    new_right = u
+    return new_left, new_right
+
+
 def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_phase=0.0):
     pitch = geometry["stall_pitch"]
     row_depth = geometry["row_depth"]
@@ -587,6 +622,8 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
     stalls = []
     aisles = []
     run_count = 0
+    v_aisle = v + geometry["row_depth"]
+    aisle_depth = geometry["aisle"]
 
     for start, end in runs:
         if end - start < MIN_RUN_COLUMNS:
@@ -594,8 +631,15 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
 
         left_u = columns[start][0]
         right_u = columns[end - 1][0] + geometry["stall_pitch"]
+        aisle_left, aisle_right = extend_aisle_to_ring(
+            polygon, basis, left_u, right_u, v_aisle, aisle_depth, clearance, min_u, max_u,
+        )
+
+        # A bay is usable when its aisle can reach the ring (after extension).
         connected = (
-            touches_ring(polygon, basis, left_u, v, depth, clearance)
+            touches_ring(polygon, basis, aisle_left, v, depth, clearance)
+            or touches_ring(polygon, basis, aisle_right, v, depth, clearance)
+            or touches_ring(polygon, basis, left_u, v, depth, clearance)
             or touches_ring(polygon, basis, right_u, v, depth, clearance)
         )
         if not connected:
@@ -610,10 +654,10 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
 
         aisles.append(rectangle_world(
             basis,
-            left_u,
-            v + geometry["row_depth"],
-            right_u - left_u,
-            geometry["aisle"],
+            aisle_left,
+            v_aisle,
+            aisle_right - aisle_left,
+            aisle_depth,
             z,
         ))
         run_count += 1
@@ -682,12 +726,29 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
 def layout_for_angle(polygon, basis, clearance, z, geometry):
     pitch = geometry["stall_pitch"]
     period = geometry["double_module"]
+    min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
     best = None
 
-    for v_step in range(V_PHASE_STEPS):
-        v_phase = period * v_step / float(V_PHASE_STEPS)
-        for u_step in range(U_PHASE_STEPS):
-            u_phase = pitch * u_step / float(U_PHASE_STEPS)
+    v_phases = [period * step / float(V_PHASE_STEPS) for step in range(V_PHASE_STEPS)]
+    # Also flush modules to the far edge of the core so leftover strips shrink.
+    span = max_v - min_v
+    modules = int(span / period)
+    if modules >= 1:
+        flush_start = max_v - modules * period
+        v_phases.append((flush_start - min_v) % period)
+    v_phases.append(0.0)
+
+    u_phases = [pitch * step / float(U_PHASE_STEPS) for step in range(U_PHASE_STEPS)]
+    u_phases.append(0.0)
+
+    seen = set()
+    for v_phase in v_phases:
+        v_key = round(v_phase, 3)
+        for u_phase in u_phases:
+            key = (v_key, round(u_phase, 3))
+            if key in seen:
+                continue
+            seen.add(key)
             candidate = layout_for_phase(
                 polygon, basis, clearance, z, geometry, u_phase, v_phase,
             )
@@ -728,15 +789,41 @@ def stall_corners_world(base_x, base_y, dx, dy, nx, ny, stall_width, depth):
     ]
 
 
+def point_on_street_frontage(px, py, street_edge, clear=DRIVEWAY_CLEAR):
+    """True when a stall sits on the street edge or inside a curb-cut gap."""
+    if not street_edge:
+        return False
+    ax, ay = street_edge["a"]
+    bx, by = street_edge["b"]
+    if distance_to_segment(px, py, ax, ay, bx, by) > STALL_WIDTH * 0.75:
+        return False
+
+    # Keep driveway throats open at the entry / exit stations.
+    for station in access_points_on_street_edge(street_edge):
+        if math.hypot(px - station[0], py - station[1]) <= clear * 0.5:
+            return True
+    return False
+
+
 def stalls_along_world_edge(
     ax, ay, bx, by, extend_x, extend_y, site_polygon, z,
     stall_width=STALL_WIDTH, depth=STALL_STRIPE, occupied=None, min_clearance=0.0,
+    street_edge=None, skip_street_edge=False,
 ):
     """Place a 90 degree stall row along a world-space edge."""
     occupied = occupied if occupied is not None else []
     edge_length = math.hypot(bx - ax, by - ay)
     if edge_length < stall_width * MIN_RUN_COLUMNS:
         return [], occupied
+
+    if skip_street_edge and street_edge:
+        sa, sb = street_edge["a"], street_edge["b"]
+        # Same boundary segment as the designated street frontage.
+        if (
+            distance_to_segment(ax, ay, sa[0], sa[1], sb[0], sb[1]) < 1.0
+            and distance_to_segment(bx, by, sa[0], sa[1], sb[0], sb[1]) < 1.0
+        ):
+            return [], occupied
 
     dx = (bx - ax) / edge_length
     dy = (by - ay) / edge_length
@@ -755,6 +842,11 @@ def stalls_along_world_edge(
         base_x = ax + dx * t
         base_y = ay + dy * t
         corners = stall_corners_world(base_x, base_y, dx, dy, nx, ny, stall_width, depth)
+        mid_x = sum(c[0] for c in corners) / 4.0
+        mid_y = sum(c[1] for c in corners) / 4.0
+
+        if point_on_street_frontage(mid_x, mid_y, street_edge):
+            continue
 
         usable = True
         for corner_x, corner_y in corners:
@@ -772,13 +864,18 @@ def stalls_along_world_edge(
     return stalls, occupied
 
 
-def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH):
+def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH, street_edge=None):
     """Offset-ring helper: stalls backing onto a constant-offset contour."""
     stalls = []
     placed = placed if placed is not None else []
     count = len(polygon)
+    street_index = street_edge["index"] if street_edge else None
 
     for index in range(count):
+        # Leave the street frontage open for curb cuts into the ring.
+        if street_index is not None and index == street_index:
+            continue
+
         ax, ay = polygon[index]
         bx, by = polygon[(index + 1) % count]
         edge_length = math.hypot(bx - ax, by - ay)
@@ -821,7 +918,7 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH)
 
 
 def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
-                      stall_width, setback):
+                      stall_width, setback, street_edge=None):
     """Perimeter stalls on the outside of an orthogonal racetrack only."""
     occupied = []
     stalls = []
@@ -841,6 +938,7 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
         row, occupied = stalls_along_world_edge(
             ax, ay, bx, by, out_x, out_y,
             site_polygon, z, stall_width, STALL_STRIPE, occupied, setback,
+            street_edge=street_edge, skip_street_edge=True,
         )
         stalls.extend(row)
 
@@ -890,7 +988,7 @@ def better_candidate(current, challenger):
     return current
 
 
-def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
+def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_edge=None):
     """Trial orthogonal racetracks: outer stalls on the ring, grid inside."""
     best = None
     rects = ortho_rect_candidates(polygon, basis, setback, stall_width)
@@ -921,7 +1019,7 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
                 ring_stalls = ortho_ring_stalls(
                     basis, polygon, z,
                     ru0, ru1, rv0, rv1,
-                    stall_width, setback,
+                    stall_width, setback, street_edge,
                 )
 
             interior = None
@@ -942,9 +1040,11 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
     return best
 
 
-def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH):
+def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH, street_edge=None):
     """Site-following ring: outer stalls only, then grid inside the ring."""
-    outer_row, _placed = perimeter_row(polygon, z, setback, None, stall_width)
+    outer_row, _placed = perimeter_row(
+        polygon, z, setback, None, stall_width, street_edge=street_edge,
+    )
     ring_outer = setback + STALL_STRIPE
 
     variants = []
@@ -955,10 +1055,10 @@ def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH):
     return variants
 
 
-def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width):
+def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street_edge=None):
     best = None
     for perimeter_stalls, ring_outer, clearance in build_offset_variants(
-        polygon, z, setback, stall_width,
+        polygon, z, setback, stall_width, street_edge,
     ):
         interior = layout_for_angle(polygon, basis, clearance, z, geometry)
         outer_poly, inner_poly = ring_band_points(polygon, z, ring_outer, ring_outer + RING_WIDTH)
@@ -984,10 +1084,14 @@ def _search_layouts(polygon, z, setback, access_points, stall_width, park_config
     for angle in orientations:
         basis = make_basis(origin, angle)
         for geometry in geometries:
-            ortho = try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width)
+            ortho = try_ortho_layouts(
+                polygon, basis, z, setback, geometry, stall_width, street_edge,
+            )
             best = better_candidate(best, ortho)
 
-            offset = try_offset_layouts(polygon, basis, z, setback, geometry, stall_width)
+            offset = try_offset_layouts(
+                polygon, basis, z, setback, geometry, stall_width, street_edge,
+            )
             best = better_candidate(best, offset)
 
     return best

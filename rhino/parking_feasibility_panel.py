@@ -233,14 +233,6 @@ def draw_access(access_points, z, street_edge=None):
         if edge_id:
             rs.ObjectLayer(edge_id, LAYERS["access"])
             created.append(edge_id)
-
-    for point in access_points:
-        access = core.as_tuple(point)
-        marker_plane = rs.PlaneFromNormal((access[0], access[1], z), (0, 0, 1))
-        circle = rs.AddCircle(marker_plane, 4.0)
-        if circle:
-            rs.ObjectLayer(circle, LAYERS["access"])
-            created.append(circle)
     return created
 
 

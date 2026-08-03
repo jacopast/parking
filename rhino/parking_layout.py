@@ -119,7 +119,7 @@ def draw_street_edge(street_edge, z):
 
 
 def draw_access(polygon, z, layout, access_points):
-    """Draw curb cuts from the street-edge access points into the ring drive."""
+    """Draw curb-cut links from the street edge into the ring (no circle markers)."""
     created = []
     outer, inner = core.layout_ring_polylines(layout, polygon, z)
     ring_center = None
@@ -131,17 +131,11 @@ def draw_access(polygon, z, layout, access_points):
     elif layout.get("ring_mode") != "ortho":
         ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
 
+    if not ring_center:
+        return created
+
     for point in access_points:
         access = core.as_tuple(point)
-        marker_plane = rs.PlaneFromNormal((access[0], access[1], z), (0, 0, 1))
-        marker = rs.AddCircle(marker_plane, 3.0)
-        if marker:
-            rs.ObjectLayer(marker, LAYERS["circulation"])
-            created.append(marker)
-
-        if not ring_center:
-            continue
-
         nearest = None
         for x, y in ring_center:
             distance = (x - access[0]) ** 2 + (y - access[1]) ** 2
