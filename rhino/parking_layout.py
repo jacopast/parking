@@ -5,11 +5,12 @@ plus the entrance and exit points.
 
 The layout uses circulation-first packing:
 
-    find orientation -> orthogonal ring drive -> double-load the ring -> core grid
+    find orientation -> orthogonal ring drive -> outer stalls on the ring -> core grid
 
 Trial-and-error searches aisle orientation and racetrack seating so the loop
-stays orthogonal to the stall grid (no oblique ring corners). Short or
-unconnected bay runs are trimmed away. No text is drawn.
+stays orthogonal to the stall grid. Only the outside of the ring gets a
+perimeter stall row; the inside is filled with a double-loaded module grid.
+Short or unconnected bay runs are trimmed away. No text is drawn.
 """
 
 import os

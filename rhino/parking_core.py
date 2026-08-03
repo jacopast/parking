@@ -8,12 +8,13 @@ Surface lots are planned the way practitioners iterate a sketch:
 2. For each orientation, try to seat an orthogonal circulation loop
    (a rectangular "racetrack" in that frame) so the drive has no oblique
    corners relative to the parking grid.
-3. Double-load the loop: one stall row outside the drive, one inside.
-4. Fill the remaining core with a 90 degree module grid, searching lattice
-   phase (tile-and-trim).
+3. Load only the outside of the loop with a perimeter stall row (backs to
+   the setback / property edge). The inside of the loop is not single-loaded
+   again — that would waste a module edge.
+4. Fill everything inside the ring with a 90 degree double-loaded module
+   grid, searching lattice phase (tile-and-trim).
 5. Keep the candidate with the most driveable stalls. Prefer orthogonal
-   rings over site-offset rings when counts tie, because an orthogonal
-   loop packs the interior grid better.
+   rings over site-offset rings when counts tie.
 
 If no orthogonal racetrack fits (awkward pockets), fall back to a ring that
 offsets the site boundary. Diagonal 60/45 modules are last-resort only when
@@ -742,9 +743,9 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH)
     return stalls, placed
 
 
-def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1, iu0, iu1, iv0, iv1,
-                      use_outer, use_inner, stall_width, setback):
-    """Double-load an orthogonal racetrack: rows outside and inside the drive."""
+def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
+                      stall_width, setback):
+    """Perimeter stalls on the outside of an orthogonal racetrack only."""
     occupied = []
     stalls = []
 
@@ -754,36 +755,17 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1, iu0, iu1, iv0,
         ((ru1, rv1), (ru0, rv1), (0.0, 1.0)),
         ((ru0, rv1), (ru0, rv0), (-1.0, 0.0)),
     ]
-    inner_edges = [
-        ((iu0, iv0), (iu1, iv0), (0.0, 1.0)),
-        ((iu1, iv0), (iu1, iv1), (-1.0, 0.0)),
-        ((iu1, iv1), (iu0, iv1), (0.0, -1.0)),
-        ((iu0, iv1), (iu0, iv0), (1.0, 0.0)),
-    ]
 
-    if use_outer:
-        for (a, b, local_out) in outer_edges:
-            ax, ay = to_world(basis, a[0], a[1])
-            bx, by = to_world(basis, b[0], b[1])
-            out_x = basis["u"][0] * local_out[0] + basis["v"][0] * local_out[1]
-            out_y = basis["u"][1] * local_out[0] + basis["v"][1] * local_out[1]
-            row, occupied = stalls_along_world_edge(
-                ax, ay, bx, by, out_x, out_y,
-                site_polygon, z, stall_width, STALL_STRIPE, occupied, setback,
-            )
-            stalls.extend(row)
-
-    if use_inner:
-        for (a, b, local_in) in inner_edges:
-            ax, ay = to_world(basis, a[0], a[1])
-            bx, by = to_world(basis, b[0], b[1])
-            in_x = basis["u"][0] * local_in[0] + basis["v"][0] * local_in[1]
-            in_y = basis["u"][1] * local_in[0] + basis["v"][1] * local_in[1]
-            row, occupied = stalls_along_world_edge(
-                ax, ay, bx, by, in_x, in_y,
-                site_polygon, z, stall_width, STALL_STRIPE, occupied, setback,
-            )
-            stalls.extend(row)
+    for (a, b, local_out) in outer_edges:
+        ax, ay = to_world(basis, a[0], a[1])
+        bx, by = to_world(basis, b[0], b[1])
+        out_x = basis["u"][0] * local_out[0] + basis["v"][0] * local_out[1]
+        out_y = basis["u"][1] * local_out[0] + basis["v"][1] * local_out[1]
+        row, occupied = stalls_along_world_edge(
+            ax, ay, bx, by, out_x, out_y,
+            site_polygon, z, stall_width, STALL_STRIPE, occupied, setback,
+        )
+        stalls.extend(row)
 
     return stalls
 
@@ -800,7 +782,7 @@ def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta):
         "stall_count": total,
         "run_count": interior["run_count"] if interior else 0,
         "angle": basis["angle"],
-        "park_angle": geometry["park_angle"] if interior else geometry["park_angle"],
+        "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
         "u_phase": interior.get("u_phase", 0.0) if interior else 0.0,
         "v_phase": interior.get("v_phase", 0.0) if interior else 0.0,
@@ -818,7 +800,6 @@ def candidate_score(candidate):
     """Stall count first; small bonus for orthogonal (no oblique) circulation."""
     if candidate is None:
         return -1
-    # Five stalls of bonus: prefer a clean racetrack when counts are close.
     return candidate["stall_count"] + (5 if candidate.get("ortho_bonus") else 0)
 
 
@@ -833,14 +814,13 @@ def better_candidate(current, challenger):
 
 
 def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
-    """Trial orthogonal racetracks: ring first, double-load, then core grid."""
+    """Trial orthogonal racetracks: outer stalls on the ring, grid inside."""
     best = None
     rects = ortho_rect_candidates(polygon, basis, setback, stall_width)
 
     for u0, u1, v0, v1 in rects:
-        # Usable pad after setback is the fitted rect; peel outer stalls + ring.
-        # Outer stall backs sit on the pad edge; ring sits inside that band.
-        for use_outer, use_inner in ((True, True), (True, False), (False, False)):
+        # Pad edge -> outer stall band -> ring -> interior grid core.
+        for use_outer in (True, False):
             outer_band = STALL_STRIPE if use_outer else 0.0
             ru0 = u0 + outer_band
             ru1 = u1 - outer_band
@@ -856,18 +836,16 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
             iv0 = rv0 + RING_WIDTH
             iv1 = rv1 - RING_WIDTH
 
-            inner_band = STALL_STRIPE if use_inner else 0.0
-            cu0 = iu0 + inner_band
-            cu1 = iu1 - inner_band
-            cv0 = iv0 + inner_band
-            cv1 = iv1 - inner_band
+            # Interior starts at the inner curb — no second perimeter row.
+            cu0, cu1, cv0, cv1 = iu0, iu1, iv0, iv1
 
-            ring_stalls = ortho_ring_stalls(
-                basis, polygon, z,
-                ru0, ru1, rv0, rv1,
-                iu0, iu1, iv0, iv1,
-                use_outer, use_inner, stall_width, setback,
-            )
+            ring_stalls = []
+            if use_outer:
+                ring_stalls = ortho_ring_stalls(
+                    basis, polygon, z,
+                    ru0, ru1, rv0, rv1,
+                    stall_width, setback,
+                )
 
             interior = None
             if cu1 - cu0 >= MIN_CORE_SPAN and cv1 - cv0 >= geometry["single_module"]:
@@ -888,15 +866,13 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width):
 
 
 def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH):
-    """Site-following ring variants for shapes that reject an ortho racetrack."""
-    outer_row, placed = perimeter_row(polygon, z, setback, None, stall_width)
+    """Site-following ring: outer stalls only, then grid inside the ring."""
+    outer_row, _placed = perimeter_row(polygon, z, setback, None, stall_width)
     ring_outer = setback + STALL_STRIPE
-    inner_row, _ = perimeter_row(polygon, z, ring_outer + RING_WIDTH, list(placed), stall_width)
 
     variants = []
-    if outer_row and inner_row:
-        variants.append((outer_row + inner_row, ring_outer, ring_outer + RING_WIDTH + STALL_STRIPE))
     if outer_row:
+        # Clearance = inner curb of the ring; interior grid fills from there in.
         variants.append((outer_row, ring_outer, ring_outer + RING_WIDTH))
     variants.append(([], setback, setback + RING_WIDTH))
     return variants

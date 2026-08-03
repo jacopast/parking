@@ -169,10 +169,10 @@ The packer automates the usual sketching loop:
 
 1. Try grid orientations aligned to long site edges (and the access vector).
 2. Seat an **orthogonal circulation racetrack** in that frame so the drive has no oblique corners relative to the stalls.
-3. Double-load the loop: one stall row outside the drive, one inside.
-4. Fill the remaining core with a 90 degree module grid (tile-and-trim over lattice phase).
-5. If an orthogonal racetrack will not fit, fall back to a ring that offsets the site boundary.
-6. Keep the trial with the most driveable stalls; prefer orthogonal rings when counts tie.
+3. Place a perimeter stall row on the **outside** of the ring only (backs toward the setback).
+4. Fill **everything inside the ring** with a 90 degree double-loaded module grid (tile-and-trim over lattice phase). Do not add a second single-loaded row on the inside of the ring.
+5. If an orthogonal racetrack will not fit, fall back to a ring that offsets the site boundary (still outer stalls + interior grid).
+6. Keep the trial with the most driveable stalls; prefer orthogonal rings when counts are close.
 
 Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 
