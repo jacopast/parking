@@ -19,9 +19,20 @@ import sys
 
 import rhinoscriptsyntax as rs
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR in sys.path:
+    sys.path.remove(_SCRIPT_DIR)
+sys.path.insert(0, _SCRIPT_DIR)
+sys.modules.pop("parking_core", None)
 
 import parking_core as core
+
+if not hasattr(core, "street_edge_from_pick"):
+    raise ImportError(
+        "parking_core.py is outdated or from the wrong folder.\n"
+        "Keep the whole rhino/ folder together, then re-download:\n"
+        "https://github.com/jacopast/parking/archive/refs/heads/cursor/rhino-parking-layout-e880.zip"
+    )
 
 try:
     import Rhino
