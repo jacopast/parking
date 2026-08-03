@@ -1,12 +1,13 @@
 """Create quick parking layouts directly inside Rhino.
 
 Run with Rhino's Python editor or the RunPythonScript command. Pick a usable
-area curve plus entrance and exit points, set a small number of layout limits,
-and the script draws parking stalls, circulation guides, labels, and a summary
-in the current Rhino file.
+area curve plus entrance and exit points, then the script searches a small set
+of orientations and draws a double-loaded surface parking layout:
 
-The script intentionally uses rhinoscriptsyntax so it works in Rhino 7
-IronPython and Rhino 8 Python.
+    stall row (18 ft) + drive aisle (24 ft) + stall row (18 ft)
+
+No per-stall labels are drawn. Geometry and one summary note are placed on
+Rhino layers.
 """
 
 import math
@@ -14,15 +15,12 @@ import math
 import rhinoscriptsyntax as rs
 
 
-DEFAULTS = {
-    "stall_width": 9.0,
-    "stall_depth": 18.0,
-    "aisle_width": 24.0,
-    "drive_width": 24.0,
-    "angle": 90.0,
-    "margin": 3.0,
-    "max_rows": 12,
-}
+STALL_WIDTH = 9.0
+STALL_DEPTH = 18.0
+AISLE_WIDTH = 24.0
+DOUBLE_LOADED_MODULE = STALL_DEPTH + AISLE_WIDTH + STALL_DEPTH
+DEFAULT_SETBACK = 3.0
+ANGLE_STEP_DEG = 15.0
 
 LAYERS = {
     "root": "Parking Layout",
@@ -65,60 +63,6 @@ def get_number(prompt, default, minimum=None, maximum=None):
     return value
 
 
-def get_integer(prompt, default, minimum=None, maximum=None):
-    value = rs.GetInteger(prompt, default)
-    if value is None:
-        return None
-
-    if minimum is not None and value < minimum:
-        rs.MessageBox("%s must be at least %s." % (prompt, minimum), 48, "Parking Layout")
-        return get_integer(prompt, default, minimum, maximum)
-
-    if maximum is not None and value > maximum:
-        rs.MessageBox("%s must be at most %s." % (prompt, maximum), 48, "Parking Layout")
-        return get_integer(prompt, default, minimum, maximum)
-
-    return value
-
-
-def collect_settings():
-    margin = get_number("Setback from available area bounding box in feet", DEFAULTS["margin"], 0.0)
-    if margin is None:
-        return None
-
-    max_rows = get_integer("Maximum rows to draw", DEFAULTS["max_rows"], 1, 100)
-    if max_rows is None:
-        return None
-
-    return {
-        "stall_width": DEFAULTS["stall_width"],
-        "stall_depth": DEFAULTS["stall_depth"],
-        "aisle_width": DEFAULTS["aisle_width"],
-        "drive_width": DEFAULTS["drive_width"],
-        "angle": DEFAULTS["angle"],
-        "margin": margin,
-        "max_rows": max_rows,
-    }
-
-
-def bounding_rect(curve_id):
-    box = rs.BoundingBox(curve_id)
-    if not box:
-        return None
-
-    xs = [point.X for point in box]
-    ys = [point.Y for point in box]
-    z = box[0].Z
-
-    return {
-        "min_x": min(xs),
-        "max_x": max(xs),
-        "min_y": min(ys),
-        "max_y": max(ys),
-        "z": z,
-    }
-
-
 def as_tuple(point):
     if hasattr(point, "X"):
         return (point.X, point.Y, point.Z)
@@ -131,22 +75,17 @@ def distance_2d(a, b):
     return math.sqrt((bx - ax) ** 2 + (by - ay) ** 2)
 
 
-def make_basis(entry_point, exit_point):
-    entry = as_tuple(entry_point)
-    exit = as_tuple(exit_point)
-    length = distance_2d(entry, exit)
-    if length <= 0.001:
-        return None
-
-    ux = ((exit[0] - entry[0]) / length, (exit[1] - entry[1]) / length)
+def make_basis(origin_point, angle_deg):
+    origin = as_tuple(origin_point)
+    radians = math.radians(angle_deg)
+    ux = (math.cos(radians), math.sin(radians))
     uy = (-ux[1], ux[0])
-
     return {
-        "origin": entry,
+        "origin": origin,
         "u": ux,
         "v": uy,
-        "length": length,
-        "z": entry[2],
+        "angle": angle_deg,
+        "z": origin[2],
     }
 
 
@@ -172,9 +111,13 @@ def local_to_world(point, basis):
     )
 
 
-def sample_curve_points(curve_id):
+def transform_points(points, basis):
+    return [local_to_world(point, basis) for point in points]
+
+
+def sample_curve_points(curve_id, count=128):
     points = []
-    divided = rs.DivideCurve(curve_id, 96, create_points=False)
+    divided = rs.DivideCurve(curve_id, count, create_points=False)
     if divided:
         points.extend(divided)
 
@@ -193,108 +136,31 @@ def local_bounding_rect(curve_id, basis):
     local_points = [world_to_local(point, basis) for point in points]
     us = [point[0] for point in local_points]
     vs = [point[1] for point in local_points]
-
     return {
         "min_x": min(us),
         "max_x": max(us),
         "min_y": min(vs),
         "max_y": max(vs),
+        "width": max(us) - min(us),
+        "depth": max(vs) - min(vs),
         "z": basis["z"],
     }
 
 
-def cross_2d(a, b, c):
-    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+def world_bounding_rect(curve_id):
+    box = rs.BoundingBox(curve_id)
+    if not box:
+        return None
 
-
-def point_on_segment(point, a, b):
-    if abs(cross_2d(a, b, point)) > 0.000001:
-        return False
-
-    return (
-        min(a[0], b[0]) - 0.000001 <= point[0] <= max(a[0], b[0]) + 0.000001
-        and min(a[1], b[1]) - 0.000001 <= point[1] <= max(a[1], b[1]) + 0.000001
-    )
-
-
-def segments_intersect(a, b, c, d):
-    ab_c = cross_2d(a, b, c)
-    ab_d = cross_2d(a, b, d)
-    cd_a = cross_2d(c, d, a)
-    cd_b = cross_2d(c, d, b)
-
-    if ab_c * ab_d < 0 and cd_a * cd_b < 0:
-        return True
-
-    return (
-        point_on_segment(c, a, b)
-        or point_on_segment(d, a, b)
-        or point_on_segment(a, c, d)
-        or point_on_segment(b, c, d)
-    )
-
-
-def point_in_polygon(point, polygon):
-    x = point[0]
-    y = point[1]
-    inside = False
-    count = len(polygon)
-
-    for index in range(count):
-        a = polygon[index]
-        b = polygon[(index + 1) % count]
-
-        if point_on_segment(point, a, b):
-            return True
-
-        crosses = (a[1] > y) != (b[1] > y)
-        if crosses:
-            intersection_x = (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]
-            if x < intersection_x:
-                inside = not inside
-
-    return inside
-
-
-def polygon_overlaps(poly_a, poly_b):
-    if not poly_a or not poly_b:
-        return False
-
-    for index_a in range(len(poly_a)):
-        a1 = poly_a[index_a]
-        a2 = poly_a[(index_a + 1) % len(poly_a)]
-
-        for index_b in range(len(poly_b)):
-            b1 = poly_b[index_b]
-            b2 = poly_b[(index_b + 1) % len(poly_b)]
-            if segments_intersect(a1, a2, b1, b2):
-                return True
-
-    if point_in_polygon(poly_a[0], poly_b):
-        return True
-
-    if point_in_polygon(poly_b[0], poly_a):
-        return True
-
-    return False
-
-
-def build_drive_corridor(basis, width):
-    half_width = width / 2.0
-    extension = width * 0.5
-    start = -extension
-    end = basis["length"] + extension
-
-    return [
-        (start, -half_width, basis["z"]),
-        (end, -half_width, basis["z"]),
-        (end, half_width, basis["z"]),
-        (start, half_width, basis["z"]),
-    ]
-
-
-def transform_points(points, basis):
-    return [local_to_world(point, basis) for point in points]
+    xs = [point.X for point in box]
+    ys = [point.Y for point in box]
+    return {
+        "min_x": min(xs),
+        "max_x": max(xs),
+        "min_y": min(ys),
+        "max_y": max(ys),
+        "z": box[0].Z,
+    }
 
 
 def point_in_boundary(point, boundary_id):
@@ -310,18 +176,28 @@ def polygon_inside_boundary(points, boundary_id):
     return True
 
 
+def rectangle_points(x, y, width, depth, z):
+    return [
+        (x, y, z),
+        (x + width, y, z),
+        (x + width, y + depth, z),
+        (x, y + depth, z),
+    ]
+
+
 def add_polyline(points, layer, close=True):
     draw_points = list(points)
-    if close and draw_points[0] != draw_points[-1]:
+    if close and draw_points and draw_points[0] != draw_points[-1]:
         draw_points.append(draw_points[0])
+
     object_id = rs.AddPolyline(draw_points)
     if object_id:
         rs.ObjectLayer(object_id, layer)
     return object_id
 
 
-def add_centered_text(text, point, height, layer):
-    text_id = rs.AddText(text, point, height=height, justification=2)
+def add_text(text, point, height, layer):
+    text_id = rs.AddText(text, point, height=height)
     if text_id:
         rs.ObjectLayer(text_id, layer)
     return text_id
@@ -335,159 +211,229 @@ def add_marker(point, label, radius, layer):
         rs.ObjectLayer(circle_id, layer)
         created.append(circle_id)
 
-    text_point = (point[0], point[1] + radius * 1.6, point[2])
-    text_id = add_centered_text(label, text_point, radius * 0.9, layer)
+    text_point = (point[0], point[1] + radius * 1.8, point[2])
+    text_id = add_text(label, text_point, max(radius * 0.8, 2.0), layer)
     if text_id:
         created.append(text_id)
 
     return created
 
 
-def draw_layout(boundary_id, entry_point, exit_point, settings):
-    basis = make_basis(entry_point, exit_point)
-    if not basis:
-        rs.MessageBox("Entrance and exit points are too close together.", 16, "Parking Layout")
-        return None
+def normalize_angle(angle_deg):
+    value = angle_deg % 180.0
+    if value < 0:
+        value += 180.0
+    return value
 
-    rect = local_bounding_rect(boundary_id, basis)
-    world_rect = bounding_rect(boundary_id)
-    if not rect or not world_rect:
-        rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
-        return None
 
-    setup_layers()
-
-    reference_copy = rs.CopyObject(boundary_id)
-    if reference_copy:
-        rs.ObjectLayer(reference_copy, LAYERS["boundary"])
-
+def candidate_angles(entry_point, exit_point, boundary_id):
+    angles = []
     entry = as_tuple(entry_point)
-    exit = as_tuple(exit_point)
+    exit_pt = as_tuple(exit_point)
 
-    margin = settings["margin"]
-    min_x = rect["min_x"] + margin
-    max_x = rect["max_x"] - margin
-    min_y = rect["min_y"] + margin
-    max_y = rect["max_y"] - margin
+    if distance_2d(entry, exit_pt) > 0.001:
+        access_angle = math.degrees(math.atan2(exit_pt[1] - entry[1], exit_pt[0] - entry[0]))
+        angles.extend([access_angle, access_angle + 90.0])
+
+    points = sample_curve_points(boundary_id, 32)
+    for index in range(len(points)):
+        a = as_tuple(points[index])
+        b = as_tuple(points[(index + 1) % len(points)])
+        if distance_2d(a, b) < 1.0:
+            continue
+        edge_angle = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
+        angles.extend([edge_angle, edge_angle + 90.0])
+
+    step = 0.0
+    while step < 180.0:
+        angles.append(step)
+        step += ANGLE_STEP_DEG
+
+    unique = []
+    seen = set()
+    for angle in angles:
+        key = round(normalize_angle(angle), 1)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
+def generate_double_loaded_layout(boundary_id, basis, setback):
+    rect = local_bounding_rect(boundary_id, basis)
+    if not rect:
+        return None
+
+    min_x = rect["min_x"] + setback
+    max_x = rect["max_x"] - setback
+    min_y = rect["min_y"] + setback
+    max_y = rect["max_y"] - setback
     z = rect["z"]
 
     usable_width = max_x - min_x
     usable_depth = max_y - min_y
-    if usable_width <= 0 or usable_depth <= 0:
-        rs.MessageBox("The margin is larger than the selected available area.", 16, "Parking Layout")
+    if usable_width < STALL_WIDTH or usable_depth < DOUBLE_LOADED_MODULE:
         return None
 
-    radians = math.radians(settings["angle"])
-    stall_width = settings["stall_width"]
-    stall_depth = settings["stall_depth"]
-    aisle_width = settings["aisle_width"]
-    drive_width = settings["drive_width"]
-    horizontal_shift = math.cos(radians) * stall_depth
-    bay_depth = max(math.sin(radians) * stall_depth, stall_depth * 0.5)
-    row_pitch = bay_depth + aisle_width
-    drive_corridor = build_drive_corridor(basis, drive_width)
-    drive_corridor_world = transform_points(drive_corridor, basis)
+    stalls = []
+    aisles = []
+    stripe = 0
+    y = min_y
 
-    row_count = min(settings["max_rows"], int((usable_depth + aisle_width) / row_pitch))
-    if row_count < 1:
-        rs.MessageBox("No rows fit inside the selected available area.", 48, "Parking Layout")
+    while y + DOUBLE_LOADED_MODULE <= max_y + 0.001:
+        aisle_y = y + STALL_DEPTH
+        row_specs = [
+            (y, STALL_DEPTH),
+            (y + STALL_DEPTH + AISLE_WIDTH, STALL_DEPTH),
+        ]
+        aisle_cells = []
+        stripe_stalls = []
+
+        x = min_x
+        while x + STALL_WIDTH <= max_x + 0.001:
+            aisle_local = rectangle_points(x, aisle_y, STALL_WIDTH, AISLE_WIDTH, z)
+            aisle_world = transform_points(aisle_local, basis)
+            if not polygon_inside_boundary(aisle_world, boundary_id):
+                x += STALL_WIDTH
+                continue
+
+            placed_pair = []
+            valid_pair = True
+            for row_y, row_depth in row_specs:
+                stall_local = rectangle_points(x, row_y, STALL_WIDTH, row_depth, z)
+                stall_world = transform_points(stall_local, basis)
+                if not polygon_inside_boundary(stall_world, boundary_id):
+                    valid_pair = False
+                    break
+                placed_pair.append(stall_world)
+
+            # Keep only complete double-loaded pairs with their shared aisle.
+            if valid_pair:
+                stripe_stalls.extend(placed_pair)
+                aisle_cells.append((x, x + STALL_WIDTH, aisle_y, aisle_y + AISLE_WIDTH, z))
+
+            x += STALL_WIDTH
+
+        if aisle_cells:
+            merged = []
+            current = None
+            for left, right, bottom, top, aisle_z in aisle_cells:
+                if current is None:
+                    current = [left, right, bottom, top, aisle_z]
+                    continue
+                if abs(left - current[1]) <= 0.001 and abs(bottom - current[2]) <= 0.001 and abs(top - current[3]) <= 0.001:
+                    current[1] = right
+                else:
+                    merged.append(current)
+                    current = [left, right, bottom, top, aisle_z]
+            if current is not None:
+                merged.append(current)
+
+            for left, right, bottom, top, aisle_z in merged:
+                aisle_local = rectangle_points(left, bottom, right - left, top - bottom, aisle_z)
+                aisles.append(transform_points(aisle_local, basis))
+
+        stalls.extend(stripe_stalls)
+        stripe += 1
+        y = min_y + stripe * DOUBLE_LOADED_MODULE
+
+    if not stalls:
         return None
 
-    stall_count = 0
-    created = []
+    return {
+        "stalls": stalls,
+        "aisles": aisles,
+        "stall_count": len(stalls),
+        "module_count": stripe,
+        "angle": basis["angle"],
+        "rect": rect,
+    }
 
-    drive_id = add_polyline(drive_corridor_world, LAYERS["circulation"])
-    if drive_id:
-        created.append(drive_id)
 
-    centerline_id = rs.AddLine(entry, exit)
-    if centerline_id:
-        rs.ObjectLayer(centerline_id, LAYERS["circulation"])
-        created.append(centerline_id)
+def choose_best_layout(boundary_id, entry_point, exit_point, setback):
+    origin = as_tuple(entry_point)
+    best = None
 
-    created.extend(add_marker(entry, "IN", max(drive_width * 0.18, 0.8), LAYERS["circulation"]))
-    created.extend(add_marker(exit, "OUT", max(drive_width * 0.18, 0.8), LAYERS["circulation"]))
-
-    for row in range(row_count):
-        direction = 1 if row % 2 == 0 else -1
-        shift = horizontal_shift * direction
-        row_min_x = min_x + (abs(shift) if shift < 0 else 0)
-        y = min_y + row * row_pitch
-        columns = int((usable_width - abs(shift)) / stall_width)
-
-        if columns < 1 or y + bay_depth > max_y:
+    for angle in candidate_angles(entry_point, exit_point, boundary_id):
+        basis = make_basis(origin, angle)
+        layout = generate_double_loaded_layout(boundary_id, basis, setback)
+        if not layout:
             continue
 
-        aisle_y = y + bay_depth
-        aisle_points_local = [
-            (min_x, aisle_y, z),
-            (max_x, aisle_y, z),
-            (max_x, min(aisle_y + aisle_width, max_y), z),
-            (min_x, min(aisle_y + aisle_width, max_y), z),
-        ]
-        if aisle_y < max_y:
-            aisle_points = transform_points(aisle_points_local, basis)
-            if polygon_inside_boundary(aisle_points, boundary_id):
-                aisle_id = add_polyline(aisle_points, LAYERS["aisles"])
-                if aisle_id:
-                    created.append(aisle_id)
+        if best is None or layout["stall_count"] > best["stall_count"]:
+            best = layout
+            best["basis"] = basis
 
-        for column in range(columns):
-            x = row_min_x + column * stall_width
-            stall_points_local = [
-                (x, y, z),
-                (x + stall_width, y, z),
-                (x + stall_width + shift, y + bay_depth, z),
-                (x + shift, y + bay_depth, z),
-            ]
-            stall_points = transform_points(stall_points_local, basis)
+    return best
 
-            if not polygon_inside_boundary(stall_points, boundary_id):
-                continue
 
-            if polygon_overlaps(stall_points_local, drive_corridor):
-                continue
+def draw_layout(boundary_id, entry_point, exit_point, setback):
+    world_rect = world_bounding_rect(boundary_id)
+    if not world_rect:
+        rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
+        return None
 
-            stall_id = add_polyline(stall_points, LAYERS["stalls"])
-            if stall_id:
-                created.append(stall_id)
-                stall_count += 1
+    layout = choose_best_layout(boundary_id, entry_point, exit_point, setback)
+    if not layout:
+        rs.MessageBox("No double-loaded parking module fits this site with the current setback.", 48, "Parking Layout")
+        return None
 
-                center_x = sum(point[0] for point in stall_points) / 4.0
-                center_y = sum(point[1] for point in stall_points) / 4.0
-                label = "%02d-%02d" % (row + 1, column + 1)
-                label_id = add_centered_text(label, (center_x, center_y, z), stall_width * 0.35, LAYERS["labels"])
-                if label_id:
-                    created.append(label_id)
+    setup_layers()
+    created = []
 
-    summary = [
-        "Parking layout generated",
-        "Stalls: %s" % stall_count,
-        "Rows: %s" % row_count,
-        "Stall: %.1f ft x %.1f ft" % (stall_width, stall_depth),
-        "Aisle: %.1f ft" % aisle_width,
-        "Entrance-exit drive: %.1f ft" % drive_width,
-        "Parking: fixed perpendicular",
-    ]
+    reference_copy = rs.CopyObject(boundary_id)
+    if reference_copy:
+        rs.ObjectLayer(reference_copy, LAYERS["boundary"])
+        created.append(reference_copy)
+
+    entry = as_tuple(entry_point)
+    exit_pt = as_tuple(exit_point)
+
+    created.extend(add_marker(entry, "IN", 4.0, LAYERS["circulation"]))
+    created.extend(add_marker(exit_pt, "OUT", 4.0, LAYERS["circulation"]))
+
+    if distance_2d(entry, exit_pt) > 0.001:
+        access_line = rs.AddLine(entry, exit_pt)
+        if access_line:
+            rs.ObjectLayer(access_line, LAYERS["circulation"])
+            created.append(access_line)
+
+    for aisle in layout["aisles"]:
+        aisle_id = add_polyline(aisle, LAYERS["aisles"])
+        if aisle_id:
+            created.append(aisle_id)
+
+    for stall in layout["stalls"]:
+        stall_id = add_polyline(stall, LAYERS["stalls"])
+        if stall_id:
+            created.append(stall_id)
+
+    summary = (
+        "Parking layout\n"
+        "Stalls: %s\n"
+        "Orientation: %.0f deg\n"
+        "Module: 18 + 24 + 18 ft"
+    ) % (layout["stall_count"], layout["angle"])
     summary_point = (
         world_rect["min_x"],
-        world_rect["max_y"] + max(stall_depth, aisle_width, drive_width) * 0.8,
+        world_rect["max_y"] + 12.0,
         world_rect["z"],
     )
-    summary_id = add_centered_text("\n".join(summary), summary_point, max(stall_width * 0.45, 1.0), LAYERS["labels"])
+    summary_id = add_text(summary, summary_point, 4.0, LAYERS["labels"])
     if summary_id:
         created.append(summary_id)
 
     if created:
-        group_name = "Parking Layout %s" % rs.DocumentName()
-        group = rs.AddGroup(group_name)
+        group = rs.AddGroup("Parking Layout")
         if group:
             rs.AddObjectsToGroup(created, group)
 
     rs.Redraw()
     return {
-        "stalls": stall_count,
-        "rows": row_count,
+        "stalls": layout["stall_count"],
+        "angle": layout["angle"],
+        "modules": layout["module_count"],
     }
 
 
@@ -501,7 +447,8 @@ def main():
         return
 
     if not rs.IsCurveClosed(boundary_id):
-        rs.MessageBox("A closed available area curve gives the best automatic layout result.", 48, "Parking Layout")
+        rs.MessageBox("Use a closed available area curve for the automatic layout.", 48, "Parking Layout")
+        return
 
     entry_point = rs.GetPoint("Pick the entrance center point")
     if not entry_point:
@@ -511,22 +458,17 @@ def main():
     if not exit_point:
         return
 
-    if rs.IsCurveClosed(boundary_id):
-        if not point_in_boundary(entry_point, boundary_id) or not point_in_boundary(exit_point, boundary_id):
-            rs.MessageBox(
-                "Entrance or exit is outside the available area. The script will still keep that access route clear.",
-                48,
-                "Parking Layout",
-            )
-
-    settings = collect_settings()
-    if not settings:
+    setback = get_number("Setback from available area edge in feet", DEFAULT_SETBACK, 0.0)
+    if setback is None:
         return
 
-    result = draw_layout(boundary_id, entry_point, exit_point, settings)
+    result = draw_layout(boundary_id, entry_point, exit_point, setback)
     if result:
         rs.MessageBox(
-            "Created %s parking stalls across %s row(s)." % (result["stalls"], result["rows"]),
+            "Created %s stalls at %.0f degrees using double-loaded 18/24/18 modules." % (
+                result["stalls"],
+                result["angle"],
+            ),
             64,
             "Parking Layout",
         )

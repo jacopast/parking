@@ -133,11 +133,15 @@ The MVP uses fixed assumptions to keep feasibility studies fast and consistent:
 | Stall size | 9 ft x 18 ft |
 | Parking angle | 90 degrees |
 | Drive aisle | 24 ft |
+| Surface module | double-loaded 18 + 24 + 18 = 60 ft |
+| Orientation search | tries access direction, edge directions, and 15-degree steps |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
-| Geometry type | 2D schematic curves and labels |
+| Geometry type | 2D schematic curves and one summary label |
 
 The Rhino model should use feet if these values are intended as feet.
+
+Surface layouts only keep complete stall pairs that share a drive aisle. Incomplete single stalls without aisle access are rejected.
 
 ## Garage feasibility logic
 

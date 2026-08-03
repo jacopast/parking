@@ -143,43 +143,229 @@ def center_of(points):
     )
 
 
-def generate_surface_layout(boundary_id, setback):
-    rect = bounding_rect(boundary_id)
+def as_tuple(point):
+    if hasattr(point, "X"):
+        return (point.X, point.Y, point.Z)
+    return (point[0], point[1], point[2] if len(point) > 2 else 0.0)
+
+
+def make_basis(origin_point, angle_deg):
+    origin = as_tuple(origin_point)
+    radians = math.radians(angle_deg)
+    ux = (math.cos(radians), math.sin(radians))
+    uy = (-ux[1], ux[0])
+    return {
+        "origin": origin,
+        "u": ux,
+        "v": uy,
+        "angle": angle_deg,
+        "z": origin[2],
+    }
+
+
+def world_to_local(point, basis):
+    x, y, _ = as_tuple(point)
+    ox, oy, _ = basis["origin"]
+    dx = x - ox
+    dy = y - oy
+    return (
+        dx * basis["u"][0] + dy * basis["u"][1],
+        dx * basis["v"][0] + dy * basis["v"][1],
+        basis["z"],
+    )
+
+
+def local_to_world(point, basis):
+    u, v, _ = as_tuple(point)
+    ox, oy, oz = basis["origin"]
+    return (
+        ox + u * basis["u"][0] + v * basis["v"][0],
+        oy + u * basis["u"][1] + v * basis["v"][1],
+        oz,
+    )
+
+
+def transform_points(points, basis):
+    return [local_to_world(point, basis) for point in points]
+
+
+def sample_curve_points(curve_id, count=96):
+    points = []
+    divided = rs.DivideCurve(curve_id, count, create_points=False)
+    if divided:
+        points.extend(divided)
+    box = rs.BoundingBox(curve_id)
+    if box:
+        points.extend(box)
+    return points
+
+
+def local_bounding_rect(curve_id, basis):
+    points = sample_curve_points(curve_id)
+    if not points:
+        return None
+    local_points = [world_to_local(point, basis) for point in points]
+    us = [point[0] for point in local_points]
+    vs = [point[1] for point in local_points]
+    return {
+        "min_x": min(us),
+        "max_x": max(us),
+        "min_y": min(vs),
+        "max_y": max(vs),
+        "width": max(us) - min(us),
+        "depth": max(vs) - min(vs),
+        "z": basis["z"],
+    }
+
+
+def normalize_angle(angle_deg):
+    value = angle_deg % 180.0
+    if value < 0:
+        value += 180.0
+    return value
+
+
+def candidate_surface_angles(boundary_id, access_points):
+    angles = [0.0, 90.0]
+    if access_points and len(access_points) >= 2:
+        a = as_tuple(access_points[0])
+        b = as_tuple(access_points[1])
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        if abs(dx) + abs(dy) > 0.001:
+            access_angle = math.degrees(math.atan2(dy, dx))
+            angles.extend([access_angle, access_angle + 90.0])
+
+    points = sample_curve_points(boundary_id, 24)
+    for index in range(len(points)):
+        a = as_tuple(points[index])
+        b = as_tuple(points[(index + 1) % len(points)])
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        if abs(dx) + abs(dy) < 1.0:
+            continue
+        edge_angle = math.degrees(math.atan2(dy, dx))
+        angles.extend([edge_angle, edge_angle + 90.0])
+
+    unique = []
+    seen = set()
+    for angle in angles:
+        key = round(normalize_angle(angle), 1)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    return unique
+
+
+def generate_oriented_surface_layout(boundary_id, basis, setback):
+    rect = local_bounding_rect(boundary_id, basis)
     if not rect:
-        return {"stalls": [], "aisles": [], "rect": None}
+        return None
 
     min_x = rect["min_x"] + setback
     max_x = rect["max_x"] - setback
     min_y = rect["min_y"] + setback
     max_y = rect["max_y"] - setback
     z = rect["z"]
+    if max_x - min_x < STALL_WIDTH or max_y - min_y < DOUBLE_LOADED_MODULE:
+        return None
+
     stalls = []
     aisles = []
     stripe = 0
     y = min_y
 
     while y + DOUBLE_LOADED_MODULE <= max_y + 0.001:
-        aisle = rectangle_points(min_x, y + STALL_DEPTH, max_x - min_x, AISLE_WIDTH, z)
-        if polygon_inside_boundary(aisle, boundary_id):
-            aisles.append(aisle)
-
+        aisle_y = y + STALL_DEPTH
         row_specs = [
             (y, STALL_DEPTH),
             (y + STALL_DEPTH + AISLE_WIDTH, STALL_DEPTH),
         ]
+        aisle_cells = []
+        stripe_stalls = []
 
-        for row_y, row_depth in row_specs:
-            x = min_x
-            while x + STALL_WIDTH <= max_x + 0.001:
-                stall = rectangle_points(x, row_y, STALL_WIDTH, row_depth, z)
-                if polygon_inside_boundary(stall, boundary_id):
-                    stalls.append(stall)
+        x = min_x
+        while x + STALL_WIDTH <= max_x + 0.001:
+            aisle_local = rectangle_points(x, aisle_y, STALL_WIDTH, AISLE_WIDTH, z)
+            aisle_world = transform_points(aisle_local, basis)
+            if not polygon_inside_boundary(aisle_world, boundary_id):
                 x += STALL_WIDTH
+                continue
 
+            placed_pair = []
+            valid_pair = True
+            for row_y, row_depth in row_specs:
+                stall_local = rectangle_points(x, row_y, STALL_WIDTH, row_depth, z)
+                stall_world = transform_points(stall_local, basis)
+                if not polygon_inside_boundary(stall_world, boundary_id):
+                    valid_pair = False
+                    break
+                placed_pair.append(stall_world)
+
+            if valid_pair:
+                stripe_stalls.extend(placed_pair)
+                aisle_cells.append((x, x + STALL_WIDTH, aisle_y, aisle_y + AISLE_WIDTH, z))
+
+            x += STALL_WIDTH
+
+        if aisle_cells:
+            merged = []
+            current = None
+            for left, right, bottom, top, aisle_z in aisle_cells:
+                if current is None:
+                    current = [left, right, bottom, top, aisle_z]
+                    continue
+                if abs(left - current[1]) <= 0.001 and abs(bottom - current[2]) <= 0.001 and abs(top - current[3]) <= 0.001:
+                    current[1] = right
+                else:
+                    merged.append(current)
+                    current = [left, right, bottom, top, aisle_z]
+            if current is not None:
+                merged.append(current)
+
+            for left, right, bottom, top, aisle_z in merged:
+                aisle_local = rectangle_points(left, bottom, right - left, top - bottom, aisle_z)
+                aisles.append(transform_points(aisle_local, basis))
+
+        stalls.extend(stripe_stalls)
         stripe += 1
         y = min_y + stripe * DOUBLE_LOADED_MODULE
 
-    return {"stalls": stalls, "aisles": aisles, "rect": rect}
+    if not stalls:
+        return None
+
+    return {
+        "stalls": stalls,
+        "aisles": aisles,
+        "rect": bounding_rect(boundary_id),
+        "angle": basis["angle"],
+    }
+
+
+def generate_surface_layout(boundary_id, setback, access_points=None):
+    access_points = access_points or []
+    world_rect = bounding_rect(boundary_id)
+    if not world_rect:
+        return {"stalls": [], "aisles": [], "rect": None, "angle": 0.0}
+
+    if access_points:
+        origin = as_tuple(access_points[0])
+    else:
+        origin = (world_rect["min_x"], world_rect["min_y"], world_rect["z"])
+
+    best = None
+    for angle in candidate_surface_angles(boundary_id, access_points):
+        basis = make_basis(origin, angle)
+        layout = generate_oriented_surface_layout(boundary_id, basis, setback)
+        if not layout:
+            continue
+        if best is None or len(layout["stalls"]) > len(best["stalls"]):
+            best = layout
+
+    if best is None:
+        return {"stalls": [], "aisles": [], "rect": world_rect, "angle": 0.0}
+    return best
 
 
 def garage_capacity(length, bay_count):
@@ -264,15 +450,10 @@ def draw_surface(layout):
         object_id = add_polyline(aisle, LAYERS["access"])
         if object_id:
             created.append(object_id)
-    for index, stall in enumerate(layout["stalls"]):
+    for stall in layout["stalls"]:
         object_id = add_polyline(stall, LAYERS["surface"])
         if object_id:
             created.append(object_id)
-            if index % 20 == 0:
-                center = center_of(stall)
-                label = add_text(str(index + 1), center, 2.0, LAYERS["stats"])
-                if label:
-                    created.append(label)
     return created
 
 
@@ -346,7 +527,7 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
 
     created.extend(draw_access(access_points))
 
-    surface = generate_surface_layout(site_curve_id, setback)
+    surface = generate_surface_layout(site_curve_id, setback, access_points)
     created.extend(draw_surface(surface))
 
     surface_stalls = len(surface["stalls"])
@@ -376,12 +557,21 @@ def run_feasibility(site_curve_id, access_points, required_stalls, setback, max_
         "Parking Feasibility Summary\n"
         "Required stalls: %s\n"
         "Surface stalls: %s\n"
+        "Surface orientation: %.0f deg\n"
         "Deficit: %s\n"
         "Setback: %.1f\n"
         "Max garage levels: %s\n"
         "%s"
-    ) % (required_stalls, surface_stalls, deficit, setback, max_levels, recommendation)
-    summary_id = add_text(summary, (summary_x, summary_y, 0), 7.0, LAYERS["stats"])
+    ) % (
+        required_stalls,
+        surface_stalls,
+        surface.get("angle", 0.0),
+        deficit,
+        setback,
+        max_levels,
+        recommendation,
+    )
+    summary_id = add_text(summary, (summary_x, summary_y, 0), 4.0, LAYERS["stats"])
     if summary_id:
         created.append(summary_id)
 
