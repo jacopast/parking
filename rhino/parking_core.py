@@ -34,9 +34,13 @@ STALL_DEPTH = STALL_STRIPE
 AISLE_WIDTH = 24.0
 DOUBLE_LOADED_MODULE = 2 * STALL_STRIPE + AISLE_WIDTH
 RING_WIDTH = 24.0
-MIN_RUN_COLUMNS = 2
-MIN_CORE_SPAN = 36.0
+MIN_RUN_COLUMNS = 3
+MIN_CORE_SPAN = 42.0  # at least one single-loaded module depth
 DRIVEWAY_CLEAR = 28.0
+# Interior angles sharper than this cannot host 90 degree stalls.
+ACUTE_CORNER_DEG = 80.0
+# Keep stalls this far from an acute vertex (stall depth + aisle throat).
+ACUTE_KEEP_OUT = STALL_STRIPE + AISLE_WIDTH * 0.5
 
 AISLE_WIDTHS = {
     (90, "two-way"): 24.0,
@@ -160,6 +164,141 @@ def polygon_centroid(polygon):
             sum(point[1] for point in polygon) / float(count),
         )
     return (cx / (6.0 * area), cy / (6.0 * area))
+
+
+def signed_area(polygon):
+    area = 0.0
+    count = len(polygon)
+    for index in range(count):
+        ax, ay = polygon[index]
+        bx, by = polygon[(index + 1) % count]
+        area += ax * by - bx * ay
+    return 0.5 * area
+
+
+def interior_angle_deg(polygon, index):
+    """Interior angle at polygon[index] in degrees."""
+    count = len(polygon)
+    ax, ay = polygon[(index - 1) % count]
+    bx, by = polygon[index]
+    cx, cy = polygon[(index + 1) % count]
+    in_x, in_y = bx - ax, by - ay
+    out_x, out_y = cx - bx, cy - by
+    turn = math.atan2(in_x * out_y - in_y * out_x, in_x * out_x + in_y * out_y)
+    # CCW boundary: positive turn is left; interior = 180 - turn_deg.
+    if signed_area(polygon) >= 0:
+        interior = 180.0 - math.degrees(turn)
+    else:
+        interior = 180.0 + math.degrees(turn)
+    while interior < 0:
+        interior += 360.0
+    while interior >= 360.0:
+        interior -= 360.0
+    return interior
+
+
+def acute_vertices(polygon, threshold_deg=ACUTE_CORNER_DEG):
+    """Vertices too sharp for 90 degree parking access."""
+    result = []
+    for index in range(len(polygon)):
+        angle = interior_angle_deg(polygon, index)
+        if angle < threshold_deg:
+            result.append((index, angle, polygon[index]))
+    return result
+
+
+def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT):
+    for _index, _angle, (vx, vy) in acute_vertices(polygon):
+        if math.hypot(x - vx, y - vy) <= keep_out:
+            return True
+    return False
+
+
+def point_in_stall_xy(x, y, stall):
+    return point_inside([(p[0], p[1]) for p in stall], x, y)
+
+
+def stall_has_maneuvering_aisle(stall, site_polygon, occupied_stalls=None, aisle_ft=AISLE_WIDTH):
+    """90 degree stalls need a full aisle width clear in front of the stall.
+
+    SUDAS / ULI: perpendicular parking uses a 24 ft two-way aisle as the
+    backout / maneuvering depth in front of the stall stripe.
+    """
+    occupied_stalls = occupied_stalls or []
+    pts = [(p[0], p[1]) for p in stall]
+    if len(pts) < 4:
+        return False
+
+    cx = sum(p[0] for p in pts) / 4.0
+    cy = sum(p[1] for p in pts) / 4.0
+
+    # The stall front is a short (stall-width) edge. Probe outward from each.
+    best_ok = False
+    for index in range(4):
+        e0 = pts[index]
+        e1 = pts[(index + 1) % 4]
+        edge_len = math.hypot(e1[0] - e0[0], e1[1] - e0[1])
+        if edge_len < STALL_WIDTH * 0.6 or edge_len > STALL_WIDTH * 1.4:
+            continue
+
+        mx = 0.5 * (e0[0] + e1[0])
+        my = 0.5 * (e0[1] + e1[1])
+        dx = e1[0] - e0[0]
+        dy = e1[1] - e0[1]
+        length = math.hypot(dx, dy)
+        nx, ny = -dy / length, dx / length
+        if (mx - cx) * nx + (my - cy) * ny < 0:
+            nx, ny = -nx, -ny
+
+        ok = True
+        steps = 6
+        for step in range(1, steps + 1):
+            dist = aisle_ft * step / float(steps)
+            x = mx + nx * dist
+            y = my + ny * dist
+            if not point_inside(site_polygon, x, y):
+                ok = False
+                break
+            # Maneuvering depth may not be blocked by another stall.
+            blocked = False
+            for other in occupied_stalls:
+                if other is stall:
+                    continue
+                if point_in_stall_xy(x, y, other):
+                    blocked = True
+                    break
+            if blocked:
+                ok = False
+                break
+        if ok:
+            best_ok = True
+            break
+
+    return best_ok
+
+
+def filter_driveable_stalls(stalls, site_polygon):
+    """Drop stalls in acute tips or without a 24 ft clear aisle in front."""
+    remaining = list(stalls)
+    changed = True
+    # Iterate: removing one stall can free aisle space for others, and also
+    # reveal that a neighbor was only "clear" because we were wrong about tips.
+    while changed:
+        changed = False
+        kept = []
+        for stall in remaining:
+            cx = sum(p[0] for p in stall) / 4.0
+            cy = sum(p[1] for p in stall) / 4.0
+            if near_acute_corner(cx, cy, site_polygon):
+                changed = True
+                continue
+            others = [other for other in remaining if other is not stall]
+            if not stall_has_maneuvering_aisle(stall, site_polygon, others):
+                changed = True
+                continue
+            kept.append(stall)
+        remaining = kept
+    return remaining
 
 
 def point_inside(polygon, x, y):
@@ -924,10 +1063,15 @@ def stalls_along_world_edge(
 
         if point_on_street_frontage(mid_x, mid_y, street_edge):
             continue
+        if near_acute_corner(mid_x, mid_y, site_polygon):
+            continue
 
         usable = True
         for corner_x, corner_y in corners:
             if not has_clearance(site_polygon, corner_x, corner_y, min_clearance):
+                usable = False
+                break
+            if near_acute_corner(corner_x, corner_y, site_polygon):
                 usable = False
                 break
         if not usable:
@@ -935,8 +1079,14 @@ def stalls_along_world_edge(
         if any(convex_overlap(corners, other) for other in occupied):
             continue
 
+        stall = [(x, y, z) for x, y in corners]
+        # Require the 24 ft backout aisle now, against already accepted stalls.
+        occupied_stalls = [[(p[0], p[1], z) for p in quad] for quad in occupied]
+        if not stall_has_maneuvering_aisle(stall, site_polygon, occupied_stalls):
+            continue
+
         occupied.append(corners)
-        stalls.append([(x, y, z) for x, y in corners])
+        stalls.append(stall)
 
     return stalls, occupied
 
@@ -977,10 +1127,17 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
             corners = stall_corners_world(
                 base_x, base_y, dx, dy, nx, ny, stall_width, STALL_STRIPE,
             )
+            mid_x = sum(c[0] for c in corners) / 4.0
+            mid_y = sum(c[1] for c in corners) / 4.0
+            if near_acute_corner(mid_x, mid_y, polygon):
+                continue
 
             usable = True
             for corner_x, corner_y in corners:
                 if not has_clearance(polygon, corner_x, corner_y, base_offset - 0.05):
+                    usable = False
+                    break
+                if near_acute_corner(corner_x, corner_y, polygon):
                     usable = False
                     break
             if not usable:
@@ -988,8 +1145,13 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
             if any(convex_overlap(corners, other) for other in placed):
                 continue
 
+            stall = [(x, y, z) for x, y in corners]
+            occupied_stalls = [[(p[0], p[1], z) for p in quad] for quad in placed]
+            if not stall_has_maneuvering_aisle(stall, polygon, occupied_stalls):
+                continue
+
             placed.append(corners)
-            stalls.append([(x, y, z) for x, y in corners])
+            stalls.append(stall)
 
     return stalls, placed
 
@@ -1022,37 +1184,47 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
     return stalls
 
 
-def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta):
+def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_polygon):
     interior_stalls = interior["stalls"] if interior else []
-    total = len(ring_stalls) + len(interior_stalls)
-    if total == 0:
+    combined = list(ring_stalls) + list(interior_stalls)
+    # Final gate: every kept stall must have a real 24 ft aisle and stay out of acute tips.
+    driveable = filter_driveable_stalls(combined, site_polygon)
+    if not driveable:
         return None
 
+    driveable_set = set(id(stall) for stall in driveable)
+    perimeter_kept = sum(1 for stall in ring_stalls if id(stall) in driveable_set)
+
     return {
-        "stalls": list(ring_stalls) + interior_stalls,
+        "stalls": driveable,
         "aisles": interior["aisles"] if interior else [],
-        "stall_count": total,
+        "stall_count": len(driveable),
         "run_count": interior["run_count"] if interior else 0,
         "angle": basis["angle"],
         "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
         "u_phase": interior.get("u_phase", 0.0) if interior else 0.0,
         "v_phase": interior.get("v_phase", 0.0) if interior else 0.0,
-        "perimeter_stalls": len(ring_stalls),
+        "perimeter_stalls": perimeter_kept,
         "ring_mode": ring_meta["ring_mode"],
         "ring_outer": ring_meta.get("ring_outer", 0.0),
         "ring_inner": ring_meta.get("ring_inner", 0.0),
         "ring_outer_poly": ring_meta.get("ring_outer_poly"),
         "ring_inner_poly": ring_meta.get("ring_inner_poly"),
         "ortho_bonus": 1 if ring_meta["ring_mode"] == "ortho" else 0,
+        "long_aisle_bonus": 1 if ring_meta.get("long_aisle") else 0,
     }
 
 
 def candidate_score(candidate):
-    """Stall count first; small bonus for orthogonal (no oblique) circulation."""
+    """Stall count first; prefer orthogonal rings and long-axis island aisles."""
     if candidate is None:
         return -1
-    return candidate["stall_count"] + (5 if candidate.get("ortho_bonus") else 0)
+    return (
+        candidate["stall_count"]
+        + (5 if candidate.get("ortho_bonus") else 0)
+        + (3 if candidate.get("long_aisle_bonus") else 0)
+    )
 
 
 def better_candidate(current, challenger):
@@ -1069,6 +1241,7 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
     """Trial orthogonal racetracks: outer stalls on the ring, grid inside."""
     best = None
     rects = ortho_rect_candidates(polygon, basis, setback, stall_width)
+    origin = basis["origin"]
 
     for u0, u1, v0, v1 in rects:
         # Pad edge -> outer stall band -> ring -> interior grid core.
@@ -1090,6 +1263,11 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
 
             # Interior starts at the inner curb — no second perimeter row.
             cu0, cu1, cv0, cv1 = iu0, iu1, iv0, iv1
+            core_w = cu1 - cu0
+            core_h = cv1 - cv0
+            if core_w < MIN_CORE_SPAN or core_h < geometry["single_module"]:
+                if not use_outer:
+                    continue
 
             ring_stalls = []
             if use_outer:
@@ -1099,20 +1277,36 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
                     stall_width, setback, street_edge,
                 )
 
-            interior = None
-            if cu1 - cu0 >= MIN_CORE_SPAN and cv1 - cv0 >= geometry["single_module"]:
-                core_poly = rect_polygon_2d(basis, cu0, cu1, cv0, cv1)
-                interior = layout_for_angle(core_poly, basis, 0.0, z, geometry)
+            # Island aisles should run with the long core direction first.
+            # Modules stack across the short axis so each aisle is as long as possible.
+            if core_w >= core_h:
+                pack_angles = [basis["angle"], basis["angle"] + 90.0]
+            else:
+                pack_angles = [basis["angle"] + 90.0, basis["angle"]]
 
-            ring_meta = {
-                "ring_mode": "ortho",
-                "ring_outer_poly": rect_world_polygon(basis, ru0, ru1, rv0, rv1, z),
-                "ring_inner_poly": rect_world_polygon(basis, iu0, iu1, iv0, iv1, z),
-                "ring_outer": 0.0,
-                "ring_inner": RING_WIDTH,
-            }
-            candidate = compose_candidate(ring_stalls, interior, basis, geometry, ring_meta)
-            best = better_candidate(best, candidate)
+            for pack_angle in pack_angles:
+                pack_basis = make_basis(origin, pack_angle)
+                interior = None
+                if core_w >= MIN_CORE_SPAN and core_h >= geometry["single_module"]:
+                    core_poly = rect_polygon_2d(basis, cu0, cu1, cv0, cv1)
+                    interior = layout_for_angle(core_poly, pack_basis, 0.0, z, geometry)
+
+                long_aisle = (
+                    (core_w >= core_h and abs((pack_angle - basis["angle"]) % 180.0) < 1.0)
+                    or (core_h > core_w and abs((pack_angle - basis["angle"] - 90.0) % 180.0) < 1.0)
+                )
+                ring_meta = {
+                    "ring_mode": "ortho",
+                    "ring_outer_poly": rect_world_polygon(basis, ru0, ru1, rv0, rv1, z),
+                    "ring_inner_poly": rect_world_polygon(basis, iu0, iu1, iv0, iv1, z),
+                    "ring_outer": 0.0,
+                    "ring_inner": RING_WIDTH,
+                    "long_aisle": long_aisle,
+                }
+                candidate = compose_candidate(
+                    ring_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+                )
+                best = better_candidate(best, candidate)
 
     return best
 
@@ -1134,20 +1328,42 @@ def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH, street_e
 
 def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street_edge=None):
     best = None
+    origin = basis["origin"]
+    min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
+    span_u = max_u - min_u
+    span_v = max_v - min_v
+
     for perimeter_stalls, ring_outer, clearance in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
-        interior = layout_for_angle(polygon, basis, clearance, z, geometry)
-        outer_poly, inner_poly = ring_band_points(polygon, z, ring_outer, ring_outer + RING_WIDTH)
-        ring_meta = {
-            "ring_mode": "offset",
-            "ring_outer": ring_outer,
-            "ring_inner": ring_outer + RING_WIDTH,
-            "ring_outer_poly": outer_poly,
-            "ring_inner_poly": inner_poly,
-        }
-        candidate = compose_candidate(perimeter_stalls, interior, basis, geometry, ring_meta)
-        best = better_candidate(best, candidate)
+        # Try both island directions; prefer aisles along the longer site axis.
+        if span_u >= span_v:
+            pack_angles = [basis["angle"], basis["angle"] + 90.0]
+        else:
+            pack_angles = [basis["angle"] + 90.0, basis["angle"]]
+
+        for pack_angle in pack_angles:
+            pack_basis = make_basis(origin, pack_angle)
+            interior = layout_for_angle(polygon, pack_basis, clearance, z, geometry)
+            outer_poly, inner_poly = ring_band_points(
+                polygon, z, ring_outer, ring_outer + RING_WIDTH,
+            )
+            long_aisle = (
+                (span_u >= span_v and abs((pack_angle - basis["angle"]) % 180.0) < 1.0)
+                or (span_v > span_u and abs((pack_angle - basis["angle"] - 90.0) % 180.0) < 1.0)
+            )
+            ring_meta = {
+                "ring_mode": "offset",
+                "ring_outer": ring_outer,
+                "ring_inner": ring_outer + RING_WIDTH,
+                "ring_outer_poly": outer_poly,
+                "ring_inner_poly": inner_poly,
+                "long_aisle": long_aisle,
+            }
+            candidate = compose_candidate(
+                perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+            )
+            best = better_candidate(best, candidate)
     return best
 
 
