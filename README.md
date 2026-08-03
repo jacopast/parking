@@ -119,6 +119,7 @@ Parking Layout::Available Area
 Parking Layout::Stalls
 Parking Layout::Aisles
 Parking Layout::Circulation
+Parking Layout::Curbs
 ```
 
 ## Design basis
