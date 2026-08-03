@@ -130,25 +130,24 @@ The hard part is geometry, not the dimension table. Published module widths defi
 
 Module widths in `rhino/parking_core.py` reproduce [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), adapted from ULI and NPA, *The Dimensions of Parking*.
 
-| Park angle | Flow | Stall projection | Aisle | Double-loaded module | Stall pitch along aisle | Interlock |
-| --- | --- | --- | --- | --- | --- | --- |
-| 90 | two-way | 18 ft | 24 ft | 60 ft | 9 ft | 0 |
-| 60 | one-way | 15 ft 7 in | 20 ft 4 in | 51 ft 6 in | 10 ft 5 in | 2 ft 3 in |
-| 60 | two-way | 15 ft 7 in | 25 ft 10 in | 57 ft | 10 ft 5 in | 2 ft 3 in |
-| 45 | one-way | 12 ft 9 in | 21 ft 6 in | 47 ft | 12 ft 9 in | 3 ft 2 in |
-| 45 | two-way | 12 ft 9 in | 29 ft 8 in | 55 ft 2 in | 12 ft 9 in | 3 ft 2 in |
+Active packing uses **90 degree two-way** stalls only (18 / 24 / 18 = 60 ft module, 9 ft pitch). Diagonal 60 / 45 modules remain in code as a last-resort fallback if perpendicular search returns zero stalls.
 
-The generator derives these from the standard closed forms rather than interpolating a table:
+| Park angle | Flow | Stall projection | Aisle | Double-loaded module | Stall pitch along aisle | Interlock | Role |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 90 | two-way | 18 ft | 24 ft | 60 ft | 9 ft | 0 | primary |
+| 60 | one-way | 15 ft 7 in | 20 ft 4 in | 51 ft 6 in | 10 ft 5 in | 2 ft 3 in | last resort |
+| 60 | two-way | 15 ft 7 in | 25 ft 10 in | 57 ft | 10 ft 5 in | 2 ft 3 in | last resort |
+| 45 | one-way | 12 ft 9 in | 21 ft 6 in | 47 ft | 12 ft 9 in | 3 ft 2 in | last resort |
+| 45 | two-way | 12 ft 9 in | 29 ft 8 in | 55 ft 2 in | 12 ft 9 in | 3 ft 2 in | last resort |
 
 ```text
 stall pitch along aisle = stall width / sin(angle)
 stall projection        = stall stripe length * sin(angle)
 double-loaded module    = 2 * stall projection + aisle
 single-loaded module    = stall projection + aisle
-interlock reduction     = stall width * cos(angle) / 2
 ```
 
-Angles between 76 and 89 degrees are never generated, because they let drivers of small cars back out and leave the wrong way.
+Angles between 76 and 89 degrees are never generated.
 
 Accessible stall counts come from the [2010 ADA Standards, Table 208.2](https://www.access-board.gov/ada/#ada-208), with one van accessible stall per six accessible stalls.
 
@@ -179,7 +178,7 @@ The pipeline is the ESGI91 / Arup **tile-and-trim** method (also the offset-and-
 
 The module table is an input to the lattice, not the decision. Orientation + phase search chooses the plan with the most driveable stalls. Regular sites land near 300–320 square feet per stall; awkward shapes are usually in the mid-300s when the phase search finds a better packing.
 
-Ninety degree two-way parking usually wins. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): in the infinite plane, 90 degree double-row modules pack best, and finite sites need the turn + shift search.
+Packing is 90 degree only for now, matching the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best in the infinite plane, and finite sites need the turn + shift search. Diagonal parking is not part of the normal search.
 
 ## Prior work reviewed
 

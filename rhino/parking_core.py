@@ -14,8 +14,9 @@ offset-and-stripe pipeline used by Feasibility, BarnacleParking, and ParkSolver:
    ring drive (the "trim" step that restores circulation).
 
 ESGI91 proved that among herringbone patterns in the infinite plane, the
-rectilinear 90 degree double-row module is optimal. Angled bays are still
-searched because finite awkward polygons can occasionally fit an extra row.
+rectilinear 90 degree double-row module is optimal. This toolkit therefore
+packs with 90 degree stalls only. Diagonal (60 / 45) modules stay on disk as
+a last-resort fallback if perpendicular parking yields no stalls at all.
 
 Dimensions
 ----------
@@ -46,9 +47,13 @@ AISLE_WIDTHS = {
     (45, "one-way"): 21.5,
 }
 
-# Ninety degree is tried first: ESGI91 found it packs best in long aisles.
+# Primary packer: perpendicular stalls only.
 PARK_CONFIGS = [
     (90, "two-way"),
+]
+
+# Used only when every 90 degree search returns zero stalls.
+DIAGONAL_FALLBACK_CONFIGS = [
     (60, "one-way"),
     (45, "one-way"),
     (60, "two-way"),
@@ -608,11 +613,11 @@ def build_variants(polygon, z, setback, stall_width=STALL_WIDTH):
     return variants
 
 
-def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH):
-    """Pick the orientation + lattice phase that yields the most driveable stalls."""
+def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs):
+    """Run tile-and-trim over orientations and the given park-angle configs."""
     origin = polygon[0]
     orientations = candidate_orientations(polygon, access_points)
-    geometries = [module_geometry(angle, flow, stall_width) for angle, flow in PARK_CONFIGS]
+    geometries = [module_geometry(angle, flow, stall_width) for angle, flow in park_configs]
     best = None
 
     for perimeter_stalls, ring_outer, clearance in build_variants(polygon, z, setback, stall_width):
@@ -644,6 +649,20 @@ def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH
 
                 if best is None or candidate["stall_count"] > best["stall_count"]:
                     best = candidate
+
+    return best
+
+
+def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH):
+    """Pack with 90 degree stalls; try diagonal only if perpendicular finds nothing."""
+    best = _search_layouts(
+        polygon, z, setback, access_points, stall_width, PARK_CONFIGS,
+    )
+
+    if best is None:
+        best = _search_layouts(
+            polygon, z, setback, access_points, stall_width, DIAGONAL_FALLBACK_CONFIGS,
+        )
 
     if best:
         best["ada"] = ada_stall_count(best["stall_count"])
