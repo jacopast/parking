@@ -3,14 +3,13 @@
 Run with Rhino's RunPythonScript command. Pick a closed usable area curve
 plus the entrance and exit points.
 
-The layout uses tile-and-trim packing:
+The layout uses circulation-first packing:
 
-    setback -> perimeter ring drive (24 ft) -> module lattice inside
+    find orientation -> orthogonal ring drive -> double-load the ring -> core grid
 
-An infinite double-loaded module tiling is rotated to long edges and shifted
-(phase search) until the most stalls fit fully inside the ring. Short or
-unconnected bay runs are trimmed away so every remaining aisle meets the
-ring drive. No text is drawn.
+Trial-and-error searches aisle orientation and racetrack seating so the loop
+stays orthogonal to the stall grid (no oblique ring corners). Short or
+unconnected bay runs are trimmed away. No text is drawn.
 """
 
 import os
@@ -71,7 +70,7 @@ def add_polyline(points, layer, close=True):
 
 def draw_ring(polygon, z, layout):
     created = []
-    outer, inner = core.ring_band_points(polygon, z, layout["ring_outer"], layout["ring_inner"])
+    outer, inner = core.layout_ring_polylines(layout, polygon, z)
 
     for band in (outer, inner):
         if not band:
@@ -89,7 +88,15 @@ def draw_ring(polygon, z, layout):
 def draw_access(polygon, z, layout, entry_point, exit_point):
     """Draw curb cuts from the access points into the ring drive."""
     created = []
-    ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
+    outer, inner = core.layout_ring_polylines(layout, polygon, z)
+    ring_center = None
+    if outer and inner and len(outer) == len(inner):
+        ring_center = [
+            ((outer[i][0] + inner[i][0]) * 0.5, (outer[i][1] + inner[i][1]) * 0.5)
+            for i in range(len(outer))
+        ]
+    elif layout.get("ring_mode") != "ortho":
+        ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
 
     for point in (entry_point, exit_point):
         access = core.as_tuple(point)

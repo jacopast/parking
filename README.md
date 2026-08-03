@@ -165,20 +165,16 @@ The Rhino model should use feet.
 
 ## How the surface layout is built
 
-The pipeline is the ESGI91 / Arup **tile-and-trim** method (also the offset-and-stripe flow used by Feasibility, BarnacleParking, and ParkSolver):
+The packer automates the usual sketching loop:
 
-1. Hold the setback from the property line.
-2. Place a perimeter stall row backing onto that setback line.
-3. Run a continuous 24 ft ring drive around the site.
-4. Place a second stall row on the inside of the ring when the site is deep enough, so the ring is served on both sides.
-5. **Tile:** overlay an infinite double-loaded module lattice on the interior, aligned to long site edges (and the access vector).
-6. **Search:** try a short list of edge-weighted orientations and several lattice phases (u/v shifts within one stall pitch and one module depth).
-7. **Trim:** keep only stalls fully inside the clearance region; drop short runs and any bay that cannot reach the ring drive.
-8. Fall back to single-loaded bays in leftover strips where a full double module does not fit.
+1. Try grid orientations aligned to long site edges (and the access vector).
+2. Seat an **orthogonal circulation racetrack** in that frame so the drive has no oblique corners relative to the stalls.
+3. Double-load the loop: one stall row outside the drive, one inside.
+4. Fill the remaining core with a 90 degree module grid (tile-and-trim over lattice phase).
+5. If an orthogonal racetrack will not fit, fall back to a ring that offsets the site boundary.
+6. Keep the trial with the most driveable stalls; prefer orthogonal rings when counts tie.
 
-The module table is an input to the lattice, not the decision. Orientation + phase search chooses the plan with the most driveable stalls. Regular sites land near 300–320 square feet per stall; awkward shapes are usually in the mid-300s when the phase search finds a better packing.
-
-Packing is 90 degree only for now, matching the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best in the infinite plane, and finite sites need the turn + shift search. Diagonal parking is not part of the normal search.
+Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 
 ## Prior work reviewed
 

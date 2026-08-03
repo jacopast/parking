@@ -190,7 +190,7 @@ def generate_garage_options(rect, setback, deficit, max_levels):
 
 def draw_ring(polygon, z, layout):
     created = []
-    outer, inner = core.ring_band_points(polygon, z, layout["ring_outer"], layout["ring_inner"])
+    outer, inner = core.layout_ring_polylines(layout, polygon, z)
 
     for band in (outer, inner):
         if not band:
