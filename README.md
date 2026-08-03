@@ -126,7 +126,9 @@ Parking Layout::Labels
 
 ## Design basis
 
-Dimensions are not invented for this project. The module table in `rhino/parking_core.py` reproduces [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), which is adapted from ULI and NPA, *The Dimensions of Parking*.
+The hard part is geometry, not the dimension table. Published module widths define the lattice period (how wide a bay is). The layout itself comes from searching aisle orientation and lattice phase until the most stalls fit and still connect to the ring drive.
+
+Module widths in `rhino/parking_core.py` reproduce [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), adapted from ULI and NPA, *The Dimensions of Parking*.
 
 | Park angle | Flow | Stall projection | Aisle | Double-loaded module | Stall pitch along aisle | Interlock |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -164,19 +166,20 @@ The Rhino model should use feet.
 
 ## How the surface layout is built
 
-The pipeline is the offset-and-stripe approach that the open-source parking generators converge on:
+The pipeline is the ESGI91 / Arup **tile-and-trim** method (also the offset-and-stripe flow used by Feasibility, BarnacleParking, and ParkSolver):
 
 1. Hold the setback from the property line.
 2. Place a perimeter stall row backing onto that setback line.
 3. Run a continuous 24 ft ring drive around the site.
 4. Place a second stall row on the inside of the ring when the site is deep enough, so the ring is served on both sides.
-5. Stripe the remaining interior with parking modules, sliding each bay until it fits rather than locking it to a fixed grid.
-6. Fall back to single-loaded bays where only one stall row plus an aisle fits.
-7. Discard any bay run that is too short to be usable or that cannot reach the ring drive.
+5. **Tile:** overlay an infinite double-loaded module lattice on the interior, aligned to long site edges (and the access vector).
+6. **Search:** try a short list of edge-weighted orientations and several lattice phases (u/v shifts within one stall pitch and one module depth).
+7. **Trim:** keep only stalls fully inside the clearance region; drop short runs and any bay that cannot reach the ring drive.
+8. Fall back to single-loaded bays in leftover strips where a full double module does not fit.
 
-The generator searches candidate orientations against each park angle and keeps the plan with the most stalls. On regular sites it lands near 300 square feet per stall; on awkward shapes it degrades to roughly 420.
+The module table is an input to the lattice, not the decision. Orientation + phase search chooses the plan with the most driveable stalls. Regular sites land near 300–320 square feet per stall; awkward shapes are usually in the mid-300s when the phase search finds a better packing.
 
-Ninety degree two-way parking usually wins this search. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf), which found that 90 degree stalls in long aisles pack most efficiently. Angled bays only pay off with interlocked bays and one-way circulation, which this version does not yet generate.
+Ninety degree two-way parking usually wins. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): in the infinite plane, 90 degree double-row modules pack best, and finite sites need the turn + shift search.
 
 ## Prior work reviewed
 

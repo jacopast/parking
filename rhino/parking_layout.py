@@ -3,13 +3,14 @@
 Run with Rhino's RunPythonScript command. Pick a closed usable area curve
 plus the entrance and exit points.
 
-The layout follows normal surface parking practice:
+The layout uses tile-and-trim packing:
 
-    setback -> perimeter ring drive (24 ft) -> double-loaded bays inside
+    setback -> perimeter ring drive (24 ft) -> module lattice inside
 
-Each bay is 18 ft stall + 24 ft aisle + 18 ft stall, and bays only occupy
-the region inside the ring, so every aisle ends on the ring drive and the
-ring connects the entrance and exit to all bays. No text is drawn.
+An infinite double-loaded module tiling is rotated to long edges and shifted
+(phase search) until the most stalls fit fully inside the ring. Short or
+unconnected bay runs are trimmed away so every remaining aisle meets the
+ring drive. No text is drawn.
 """
 
 import os

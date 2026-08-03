@@ -1,30 +1,27 @@
 """Shared surface parking layout logic for the Rhino parking tools.
 
-Dimensions follow published parking geometrics rather than ad-hoc numbers.
-The module table below reproduces Iowa SUDAS Design Manual 8B-1 Table
-8B-1.02, which is adapted from ULI / NPA "The Dimensions of Parking":
+Geometry engine
+---------------
+The packing algorithm follows the ESGI91 / Arup "tile-and-trim" method and the
+offset-and-stripe pipeline used by Feasibility, BarnacleParking, and ParkSolver:
 
-    https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf
+1. Offset the site inward for setback and a continuous perimeter ring drive.
+2. Overlay an infinite double-loaded parking module tiling on the remaining
+   region (the "tile" step).
+3. Search over aisle orientation and lattice phase (rotation + translation)
+   to maximise the number of stalls that fall fully inside the region.
+4. Trim stalls that fall outside, and discard bay runs that do not reach the
+   ring drive (the "trim" step that restores circulation).
 
-The relationships used here are the standard closed forms:
+ESGI91 proved that among herringbone patterns in the infinite plane, the
+rectilinear 90 degree double-row module is optimal. Angled bays are still
+searched because finite awkward polygons can occasionally fit an extra row.
 
-    WP (stall width along the aisle) = stall width / sin(angle)
-    SP (stall projection, row depth) = stall stripe length * sin(angle)
-    M1 (double-loaded module)        = 2 * SP + aisle
-    M2 (single-loaded module)        = SP + aisle
-    interlock reduction              = stall width * cos(angle) / 2
-
-The layout pipeline is the same offset-and-stripe approach used by the
-open-source parking generators (Feasibility, BarnacleParking, ParkSolver):
-
-1. hold a setback from the property line
-2. place perimeter stall rows that back onto the setback line
-3. run a continuous perimeter ring drive that serves those rows
-4. stripe the remaining interior with parking modules
-5. discard bay runs that are too short or cannot reach the ring
-
-Because interior parking is limited to the region inside the ring, every
-aisle reaches the ring, and the ring reaches the entrance and exit.
+Dimensions
+----------
+Module widths come from Iowa SUDAS 8B-1 Table 8B-1.02 (adapted from ULI/NPA).
+Those numbers define the lattice period; they do not choose the layout.
+Orientation and phase search choose the layout.
 """
 
 import math
@@ -37,9 +34,6 @@ AISLE_WIDTH = 24.0
 DOUBLE_LOADED_MODULE = 2 * STALL_STRIPE + AISLE_WIDTH
 RING_WIDTH = 24.0
 MIN_RUN_COLUMNS = 3
-# Edge-aligned directions dominate in practice, so the sweep is only a
-# fallback for sites with no long straight edge.
-ANGLE_STEP_DEG = 45.0
 
 # Aisle width in feet by park angle and traffic flow, from Iowa SUDAS
 # Table 8B-1.02. Angles outside this table are not generated because
@@ -52,16 +46,23 @@ AISLE_WIDTHS = {
     (45, "one-way"): 21.5,
 }
 
+# Ninety degree is tried first: ESGI91 found it packs best in long aisles.
 PARK_CONFIGS = [
     (90, "two-way"),
     (60, "one-way"),
-    (60, "two-way"),
     (45, "one-way"),
+    (60, "two-way"),
     (45, "two-way"),
 ]
 
 # Chrest, "Parking Structures", flags layouts above this as inefficient.
 EFFICIENCY_TARGET_SF_PER_STALL = 330.0
+
+# Discrete translation samples over one module / one stall pitch.
+# ESGI91's continuous shift search is approximated by this lattice phase grid.
+V_PHASE_STEPS = 4
+U_PHASE_STEPS = 3
+MAX_ORIENTATIONS = 8
 
 
 def module_geometry(park_angle, flow, stall_width=STALL_WIDTH):
@@ -222,40 +223,57 @@ def normalize_angle(angle_deg):
     return value
 
 
-def candidate_angles(polygon, access_points=None):
-    angles = []
+def angle_key(angle_deg, precision=1.0):
+    """Bucket orientations so near-duplicates collapse."""
+    return round(normalize_angle(angle_deg) / precision) * precision
+
+
+def candidate_orientations(polygon, access_points=None):
+    """Edge-aligned aisle directions, weighted by edge length.
+
+    ParkSolver / Feasibility align stripes to long site edges. Dense angular
+    sweeps waste time; a short weighted list plus access direction is enough
+    for the outer search, and lattice phase does the fine packing work.
+    """
+    weights = {}
+
+    def add_angle(angle_deg, weight):
+        key = angle_key(angle_deg)
+        weights[key] = weights.get(key, 0.0) + weight
 
     access_points = access_points or []
     if len(access_points) >= 2:
         a = as_tuple(access_points[0])
         b = as_tuple(access_points[1])
-        if math.hypot(b[0] - a[0], b[1] - a[1]) > 1.0:
+        length = math.hypot(b[0] - a[0], b[1] - a[1])
+        if length > 1.0:
             access_angle = math.degrees(math.atan2(b[1] - a[1], b[0] - a[0]))
-            angles.extend([access_angle, access_angle + 90.0])
+            add_angle(access_angle, length * 2.0)
+            add_angle(access_angle + 90.0, length)
 
     count = len(polygon)
     for index in range(count):
         ax, ay = polygon[index]
         bx, by = polygon[(index + 1) % count]
-        if math.hypot(bx - ax, by - ay) < 5.0:
+        length = math.hypot(bx - ax, by - ay)
+        if length < 5.0:
             continue
         edge_angle = math.degrees(math.atan2(by - ay, bx - ax))
-        angles.extend([edge_angle, edge_angle + 90.0])
+        # Stripes parallel to a long edge, and stripes perpendicular to it.
+        add_angle(edge_angle, length)
+        add_angle(edge_angle + 90.0, length * 0.75)
 
-    step = 0.0
-    while step < 180.0:
-        angles.append(step)
-        step += ANGLE_STEP_DEG
+    # Stable fallbacks when the polygon is nearly round.
+    add_angle(0.0, 1.0)
+    add_angle(90.0, 1.0)
 
-    unique = []
-    seen = set()
-    for angle in angles:
-        key = round(normalize_angle(angle), 1)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(key)
-    return unique
+    ranked = sorted(weights.items(), key=lambda item: (-item[1], item[0]))
+    return [angle for angle, _weight in ranked[:MAX_ORIENTATIONS]]
+
+
+# Back-compat alias used by older call sites / docs.
+def candidate_angles(polygon, access_points=None):
+    return candidate_orientations(polygon, access_points)
 
 
 def local_polygon_fits(polygon, basis, points, clearance, edge_midpoints=True):
@@ -315,15 +333,28 @@ def touches_ring(polygon, basis, u, v0, depth, clearance):
     return False
 
 
-def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u):
+def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_phase=0.0):
     """Test each stall pitch across one bay and return the shapes that fit."""
     pitch = geometry["stall_pitch"]
     row_depth = geometry["row_depth"]
     aisle = geometry["aisle"]
 
+    # Snap the first column onto the lattice phase instead of the bbox edge.
+    # That translation search is the ESGI91 "shift" that finds extra stalls.
+    if pitch <= 1e-9:
+        return []
+
+    start_u = min_u + (u_phase % pitch)
+    while start_u > min_u + 1e-9:
+        start_u -= pitch
+
     columns = []
-    u = min_u
+    u = start_u
     while u + pitch <= max_u + 0.001:
+        if u + pitch < min_u - 0.001:
+            u += pitch
+            continue
+
         shapes = [stall_shape(u, v + row_depth, geometry, -1.0)]
         if rows == 2:
             shapes.append(stall_shape(u, v + row_depth + aisle, geometry, 1.0))
@@ -348,75 +379,105 @@ def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u):
     return columns
 
 
-def layout_for_angle(polygon, basis, clearance, z, geometry):
-    """Stripe the region inside the perimeter ring with parking modules."""
-    min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
-    slide_step = 3.0
+def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, max_u, u_phase, z):
+    """Trim a tiled bay into contiguous runs that still touch the ring."""
+    columns = bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_phase)
+    runs = []
+    run_start = None
+    for index in range(len(columns) + 1):
+        fits = columns[index][1] if index < len(columns) else False
+        if fits and run_start is None:
+            run_start = index
+        elif not fits and run_start is not None:
+            runs.append((run_start, index))
+            run_start = None
 
     stalls = []
     aisles = []
     run_count = 0
-    v = min_v
 
-    while v + geometry["single_module"] <= max_v + 0.001:
-        placed_depth = None
+    for start, end in runs:
+        if end - start < MIN_RUN_COLUMNS:
+            continue
 
-        for depth, rows in (
-            (geometry["double_module"], 2),
-            (geometry["single_module"], 1),
-        ):
-            if v + depth > max_v + 0.001:
+        left_u = columns[start][0]
+        right_u = columns[end - 1][0] + geometry["stall_pitch"]
+        connected = (
+            touches_ring(polygon, basis, left_u, v, depth, clearance)
+            or touches_ring(polygon, basis, right_u, v, depth, clearance)
+        )
+        if not connected:
+            continue
+
+        for index in range(start, end):
+            for shape in columns[index][2]:
+                stalls.append([
+                    (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
+                    for su, sv in shape
+                ])
+
+        aisles.append(rectangle_world(
+            basis,
+            left_u,
+            v + geometry["row_depth"],
+            right_u - left_u,
+            geometry["aisle"],
+            z,
+        ))
+        run_count += 1
+
+    return stalls, aisles, run_count
+
+
+def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
+    """Tile one module lattice phase, then trim to the clearance polygon."""
+    min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
+    period = geometry["double_module"]
+    if period <= 1e-9:
+        return None
+
+    stalls = []
+    aisles = []
+    run_count = 0
+
+    # Infinite-plane lattice in v, clipped to the local bbox (tile).
+    start_v = min_v + (v_phase % period)
+    while start_v > min_v + 1e-9:
+        start_v -= period
+
+    v = start_v
+    while v <= max_v + 0.001:
+        placed = False
+
+        if v + geometry["double_module"] <= max_v + 0.001:
+            bay_stalls, bay_aisles, bay_runs = place_bay_runs(
+                polygon, basis, v, geometry, 2, geometry["double_module"],
+                clearance, min_u, max_u, u_phase, z,
+            )
+            if bay_runs:
+                stalls.extend(bay_stalls)
+                aisles.extend(bay_aisles)
+                run_count += bay_runs
+                placed = True
+                v += geometry["double_module"]
                 continue
 
-            columns = bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u)
-            runs = []
-            run_start = None
-            for index in range(len(columns) + 1):
-                fits = columns[index][1] if index < len(columns) else False
-                if fits and run_start is None:
-                    run_start = index
-                elif not fits and run_start is not None:
-                    runs.append((run_start, index))
-                    run_start = None
+        if v + geometry["single_module"] <= max_v + 0.001:
+            bay_stalls, bay_aisles, bay_runs = place_bay_runs(
+                polygon, basis, v, geometry, 1, geometry["single_module"],
+                clearance, min_u, max_u, u_phase, z,
+            )
+            if bay_runs:
+                stalls.extend(bay_stalls)
+                aisles.extend(bay_aisles)
+                run_count += bay_runs
+                placed = True
+                v += geometry["single_module"]
+                continue
 
-            placed_any = False
-            for start, end in runs:
-                if end - start < MIN_RUN_COLUMNS:
-                    continue
-
-                left_u = columns[start][0]
-                right_u = columns[end - 1][0] + geometry["stall_pitch"]
-                connected = (
-                    touches_ring(polygon, basis, left_u, v, depth, clearance)
-                    or touches_ring(polygon, basis, right_u, v, depth, clearance)
-                )
-                if not connected:
-                    continue
-
-                for index in range(start, end):
-                    for shape in columns[index][2]:
-                        stalls.append([
-                            (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
-                            for su, sv in shape
-                        ])
-
-                aisles.append(rectangle_world(
-                    basis,
-                    left_u,
-                    v + geometry["row_depth"],
-                    right_u - left_u,
-                    geometry["aisle"],
-                    z,
-                ))
-                run_count += 1
-                placed_any = True
-
-            if placed_any:
-                placed_depth = depth
-                break
-
-        # Slide upward until a bay fits so bays are not locked to a fixed grid.
-        v += placed_depth if placed_depth else slide_step
+        # Empty lattice cell: advance by a stall projection so later
+        # rows on this phase can still land on usable ground after trim.
+        v += geometry["row_depth"] if geometry["row_depth"] > 1.0 else 6.0
 
     if not stalls:
         return None
@@ -429,7 +490,30 @@ def layout_for_angle(polygon, basis, clearance, z, geometry):
         "angle": basis["angle"],
         "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
+        "u_phase": u_phase,
+        "v_phase": v_phase,
     }
+
+
+def layout_for_angle(polygon, basis, clearance, z, geometry):
+    """Search lattice translations for the best packing at one orientation."""
+    pitch = geometry["stall_pitch"]
+    period = geometry["double_module"]
+    best = None
+
+    for v_step in range(V_PHASE_STEPS):
+        v_phase = period * v_step / float(V_PHASE_STEPS)
+        for u_step in range(U_PHASE_STEPS):
+            u_phase = pitch * u_step / float(U_PHASE_STEPS)
+            candidate = layout_for_phase(
+                polygon, basis, clearance, z, geometry, u_phase, v_phase,
+            )
+            if candidate is None:
+                continue
+            if best is None or candidate["stall_count"] > best["stall_count"]:
+                best = candidate
+
+    return best
 
 
 def convex_overlap(poly_a, poly_b):
@@ -525,13 +609,14 @@ def build_variants(polygon, z, setback, stall_width=STALL_WIDTH):
 
 
 def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH):
+    """Pick the orientation + lattice phase that yields the most driveable stalls."""
     origin = polygon[0]
-    angles = candidate_angles(polygon, access_points)
+    orientations = candidate_orientations(polygon, access_points)
     geometries = [module_geometry(angle, flow, stall_width) for angle, flow in PARK_CONFIGS]
     best = None
 
     for perimeter_stalls, ring_outer, clearance in build_variants(polygon, z, setback, stall_width):
-        for angle in angles:
+        for angle in orientations:
             basis = make_basis(origin, angle)
 
             for geometry in geometries:
@@ -547,9 +632,11 @@ def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH
                     "aisles": interior["aisles"] if interior else [],
                     "stall_count": total,
                     "run_count": interior["run_count"] if interior else 0,
-                    "angle": interior["angle"] if interior else 0.0,
+                    "angle": interior["angle"] if interior else angle,
                     "park_angle": interior["park_angle"] if interior else 90,
                     "flow": interior["flow"] if interior else "two-way",
+                    "u_phase": interior.get("u_phase", 0.0) if interior else 0.0,
+                    "v_phase": interior.get("v_phase", 0.0) if interior else 0.0,
                     "ring_outer": ring_outer,
                     "ring_inner": ring_outer + RING_WIDTH,
                     "perimeter_stalls": len(perimeter_stalls),
