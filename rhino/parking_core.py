@@ -268,24 +268,15 @@ def nearest_edge_index(polygon, point, max_distance=None):
     return best[1]
 
 
-def street_edge_from_pick(polygon, point, max_distance=12.0):
-    """Resolve a pick on/near the boundary to the street-frontage edge.
-
-    Returns dict with index, endpoints a/b, length, and mid point, or None.
-    """
-    index = nearest_edge_index(polygon, point, max_distance)
-    if index is None:
-        # Fall back to nearest edge even if the pick was a bit off the curve.
-        index = nearest_edge_index(polygon, point, None)
-    if index is None:
+def street_edge_from_index(polygon, index):
+    """Build a street-edge record from a polygon edge index."""
+    if index is None or index < 0 or index >= len(polygon):
         return None
-
     a = polygon[index]
     b = polygon[(index + 1) % len(polygon)]
     length = math.hypot(b[0] - a[0], b[1] - a[1])
     if length < 1.0:
         return None
-
     return {
         "index": index,
         "a": a,
@@ -293,6 +284,92 @@ def street_edge_from_pick(polygon, point, max_distance=12.0):
         "length": length,
         "mid": (0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])),
     }
+
+
+def street_edge_from_pick(polygon, point, max_distance=12.0):
+    """Resolve a pick on/near the boundary to the street-frontage edge."""
+    index = nearest_edge_index(polygon, point, max_distance)
+    if index is None:
+        index = nearest_edge_index(polygon, point, None)
+    return street_edge_from_index(polygon, index)
+
+
+def pick_street_edge(polygon, z, rs, boundary_id=None):
+    """Select one existing edge of the already-chosen site geometry.
+
+    Temporary segment curves are offered for picking so the user does not
+    draw anything new. Temps are deleted afterward.
+    """
+    temps = []
+    index_by_id = {}
+
+    try:
+        for index in range(len(polygon)):
+            a = polygon[index]
+            b = polygon[(index + 1) % len(polygon)]
+            line_id = rs.AddLine((a[0], a[1], z), (b[0], b[1], z))
+            if not line_id:
+                continue
+            temps.append(line_id)
+            index_by_id[str(line_id)] = index
+            try:
+                rs.ObjectColor(line_id, (0, 160, 255))
+            except Exception:
+                pass
+
+        if not temps:
+            return None
+
+        try:
+            rs.Redraw()
+        except Exception:
+            pass
+
+        picked = rs.GetObject(
+            "Select the street-frontage edge of the site (click one existing side — do not draw)",
+            rs.filter.curve,
+            False,
+            False,
+        )
+        if not picked:
+            return None
+
+        index = index_by_id.get(str(picked))
+        if index is not None:
+            return street_edge_from_index(polygon, index)
+
+        # Fallback: user clicked the original site curve instead of a temp edge.
+        if boundary_id and str(picked) == str(boundary_id):
+            point = rs.GetPointOnCurve(
+                boundary_id,
+                "Click the street-frontage side on the site boundary",
+            )
+            if point:
+                return street_edge_from_pick(polygon, point)
+
+        point = rs.CurveMidPoint(picked) if hasattr(rs, "CurveMidPoint") else None
+        if point is None and hasattr(rs, "CurveStartPoint") and hasattr(rs, "CurveEndPoint"):
+            start = rs.CurveStartPoint(picked)
+            end = rs.CurveEndPoint(picked)
+            if start and end:
+                point = (
+                    0.5 * (start[0] + end[0]),
+                    0.5 * (start[1] + end[1]),
+                    0.5 * (start[2] + end[2]) if len(start) > 2 else z,
+                )
+        if point:
+            return street_edge_from_pick(polygon, point)
+        return None
+    finally:
+        if temps:
+            try:
+                rs.DeleteObjects(temps)
+            except Exception:
+                for temp_id in temps:
+                    try:
+                        rs.DeleteObject(temp_id)
+                    except Exception:
+                        pass
 
 
 def access_points_on_street_edge(street_edge):

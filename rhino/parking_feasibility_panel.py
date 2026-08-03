@@ -247,13 +247,9 @@ def draw_access(access_points, z, street_edge=None):
     return created
 
 
-def pick_street_edge(site_curve_id, polygon):
-    pick = rs.GetPointOnCurve(site_curve_id, "Pick the site edge that fronts the street")
-    if not pick:
-        pick = rs.GetPoint("Pick a point on the site edge that fronts the street")
-    if not pick:
-        return None
-    return core.street_edge_from_pick(polygon, pick)
+def pick_street_edge(site_curve_id, polygon, z=0.0):
+    """Select one existing side of the site — nothing new to draw."""
+    return core.pick_street_edge(polygon, z, rs, site_curve_id)
 
 
 def run_feasibility(site_curve_id, street_edge, required_stalls, setback, max_levels):
@@ -388,11 +384,11 @@ class ParkingFeasibilityDialog(forms.Dialog[bool] if forms else object):
         if not self.site_curve_id:
             self.status_label.Text = "Pick a site curve first"
             return
-        polygon, _z = core.boundary_polygon(self.site_curve_id, rs)
+        polygon, z = core.boundary_polygon(self.site_curve_id, rs)
         if not polygon:
             self.status_label.Text = "Could not read the site curve"
             return
-        street_edge = pick_street_edge(self.site_curve_id, polygon)
+        street_edge = pick_street_edge(self.site_curve_id, polygon, z)
         if street_edge:
             self.street_edge = street_edge
             self.street_label.Text = "%.0f ft frontage" % street_edge["length"]

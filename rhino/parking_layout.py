@@ -1,7 +1,8 @@
 """Create a driveable surface parking layout inside Rhino.
 
 Run with Rhino's RunPythonScript command. Pick a closed usable area curve,
-then pick a point on the edge that fronts the public street.
+then select one existing edge of that curve as the street frontage.
+Do not draw a new line.
 
 The layout uses circulation-first packing:
 
@@ -83,19 +84,13 @@ def add_polyline(points, layer, close=True):
     return object_id
 
 
-def pick_street_edge(boundary_id, polygon):
-    """Ask the user to identify the site edge that fronts the street."""
-    pick = rs.GetPointOnCurve(boundary_id, "Pick the site edge that fronts the street")
-    if not pick:
-        # Fallback when GetPointOnCurve is unavailable or cancelled mid-gesture.
-        pick = rs.GetPoint("Pick a point on the site edge that fronts the street")
-    if not pick:
-        return None
-
-    street_edge = core.street_edge_from_pick(polygon, pick)
+def pick_street_edge(boundary_id, polygon, z):
+    """Select one existing side of the site — nothing new to draw."""
+    street_edge = core.pick_street_edge(polygon, z, rs, boundary_id)
     if not street_edge:
         rs.MessageBox(
-            "Could not match that pick to a boundary edge. Click closer to the street side.",
+            "Select one existing edge of the site boundary that fronts the street.\n"
+            "You do not need to draw a new line.",
             48,
             "Parking Layout",
         )
@@ -225,12 +220,12 @@ def main():
         rs.MessageBox("Use a closed available area curve for the automatic layout.", 48, "Parking Layout")
         return
 
-    polygon, _z = core.boundary_polygon(boundary_id, rs)
+    polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
         rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
         return
 
-    street_edge = pick_street_edge(boundary_id, polygon)
+    street_edge = pick_street_edge(boundary_id, polygon, z)
     if not street_edge:
         return
 
