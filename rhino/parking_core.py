@@ -16,13 +16,14 @@ Surface lots are planned the way practitioners iterate a sketch:
    long axis of the core so each bay run is as long as possible.
 5. Reject any stall in an acute corner, and reject any stall that does not
    have a clear 24 ft maneuvering aisle in front (SUDAS / ULI 90 degree rule).
-6. Reject circulation rings whose drive path has an acute corner. Drivers
-   should not have to turn sharper than 90 degrees on the aisle network.
-7. Keep the candidate with the most driveable stalls. Prefer orthogonal
-   rings and long-axis island aisles when counts are close.
-
-If no orthogonal racetrack fits, fall back to a site-offset ring only when
-that ring also has no acute drive corners. Diagonal 60/45 is last-resort.
+6. Circulation may follow the site. Obtuse aisle corners are fine; only
+   acute drive corners (< 90 deg) are forbidden. Sharp tips on an offset
+   ring are chamfered so the drive stays driveable without cutting the
+   whole site down to a tiny rectangle.
+7. Leave clear entry/exit openings on the street frontage — no stalls in
+   the driveway throats.
+8. Keep the candidate with the most driveable stalls. Long-axis island
+   aisles get a small tie-break bonus.
 
 Module widths come from Iowa SUDAS 8B-1 Table 8B-1.02 (ULI/NPA). They set
 the lattice period; trial-and-error over orientation and ring geometry
@@ -229,15 +230,74 @@ def polygon_min_interior_angle(polygon):
 
 
 def drive_path_has_sharp_turn(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG):
-    """True when a driver would have to turn sharper than a right angle."""
+    """True when a corner is acute. Obtuse / right-angle turns are allowed."""
     poly = as_xy_polygon(polygon)
     if len(poly) < 3:
         return True
     return polygon_min_interior_angle(poly) < min_corner_deg - 0.5
 
 
+def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG, max_passes=10):
+    """Attenuates acute tips so a drive loop never turns sharper than 90 deg.
+
+    Obtuse corners are left alone. This lets site-following rings keep most of
+    the parcel instead of collapsing to a tiny inscribed rectangle.
+    """
+    poly = [(p[0], p[1]) for p in as_xy_polygon(polygon)]
+    if len(poly) < 3:
+        return poly
+
+    for _ in range(max_passes):
+        n = len(poly)
+        acute = [
+            index for index in range(n)
+            if interior_angle_deg(poly, index) < min_corner_deg - 0.5
+        ]
+        if not acute:
+            return poly
+
+        acute_set = set(acute)
+        new_poly = []
+        for index in range(n):
+            curr = poly[index]
+            if index not in acute_set:
+                new_poly.append(curr)
+                continue
+
+            prev = poly[(index - 1) % n]
+            nxt = poly[(index + 1) % n]
+            d_prev = math.hypot(curr[0] - prev[0], curr[1] - prev[1])
+            d_next = math.hypot(nxt[0] - curr[0], nxt[1] - curr[1])
+            if d_prev < 2.0 or d_next < 2.0:
+                continue
+
+            # Cut far enough to blunt the tip, but never more than ~40% of an edge.
+            cut = min(d_prev, d_next, max(RING_WIDTH * 0.75, min(d_prev, d_next) * 0.3))
+            cut = min(cut, d_prev * 0.4, d_next * 0.4)
+            if cut < 1.0:
+                new_poly.append(curr)
+                continue
+
+            p1 = (
+                curr[0] + (prev[0] - curr[0]) * (cut / d_prev),
+                curr[1] + (prev[1] - curr[1]) * (cut / d_prev),
+            )
+            p2 = (
+                curr[0] + (nxt[0] - curr[0]) * (cut / d_next),
+                curr[1] + (nxt[1] - curr[1]) * (cut / d_next),
+            )
+            new_poly.append(p1)
+            new_poly.append(p2)
+
+        if len(new_poly) < 3:
+            return poly
+        poly = new_poly
+
+    return poly
+
+
 def ring_drive_is_acceptable(ring_outer_poly, ring_inner_poly=None):
-    """Circulation loops must stay at right angles or flatter — no acute aisles."""
+    """Circulation may be obtuse or square; acute aisle corners are rejected."""
     if not ring_outer_poly:
         return False
     if drive_path_has_sharp_turn(ring_outer_poly):
@@ -1273,7 +1333,27 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
         ((ru0, rv1), (ru0, rv0), (-1.0, 0.0)),
     ]
 
-    for (a, b, local_out) in outer_edges:
+    # Leave the ring side nearest the street fully open for entry / exit.
+    street_side = None
+    if street_edge:
+        best = None
+        for index, (a, b, _local_out) in enumerate(outer_edges):
+            ax, ay = to_world(basis, a[0], a[1])
+            bx, by = to_world(basis, b[0], b[1])
+            mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
+            dist = distance_to_segment(
+                mx, my,
+                street_edge["a"][0], street_edge["a"][1],
+                street_edge["b"][0], street_edge["b"][1],
+            )
+            if best is None or dist < best[0]:
+                best = (dist, index)
+        if best is not None:
+            street_side = best[1]
+
+    for index, (a, b, local_out) in enumerate(outer_edges):
+        if street_side is not None and index == street_side:
+            continue
         ax, ay = to_world(basis, a[0], a[1])
         bx, by = to_world(basis, b[0], b[1])
         out_x = basis["u"][0] * local_out[0] + basis["v"][0] * local_out[1]
@@ -1288,8 +1368,34 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
     return stalls
 
 
-def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_polygon):
-    # No acute turns on the circulation loop — a car should not bend past 90 deg.
+def stall_blocks_street_access(stall, street_edge, clear=DRIVEWAY_CLEAR):
+    """True when a stall sits in a street entry / exit throat."""
+    if not street_edge:
+        return False
+    cx = sum(p[0] for p in stall) / 4.0
+    cy = sum(p[1] for p in stall) / 4.0
+    ax, ay = street_edge["a"]
+    bx, by = street_edge["b"]
+    # Only stalls near the street frontage can block access.
+    if distance_to_segment(cx, cy, ax, ay, bx, by) > STALL_STRIPE + RING_WIDTH:
+        return False
+    for station in access_points_on_street_edge(street_edge):
+        if math.hypot(cx - station[0], cy - station[1]) <= clear:
+            return True
+    return False
+
+
+def filter_street_access_stalls(stalls, street_edge):
+    if not street_edge:
+        return stalls
+    return [
+        stall for stall in stalls
+        if not stall_blocks_street_access(stall, street_edge)
+    ]
+
+
+def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_polygon, street_edge=None):
+    # Acute drive corners are rejected; obtuse corners are fine.
     if not ring_drive_is_acceptable(
         ring_meta.get("ring_outer_poly"),
         ring_meta.get("ring_inner_poly"),
@@ -1298,13 +1404,14 @@ def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_po
 
     interior_stalls = interior["stalls"] if interior else []
     combined = list(ring_stalls) + list(interior_stalls)
-    # Final gate: every kept stall must have a real 24 ft aisle and stay out of acute tips.
     driveable = filter_driveable_stalls(combined, site_polygon)
+    driveable = filter_street_access_stalls(driveable, street_edge)
     if not driveable:
         return None
 
     driveable_set = set(id(stall) for stall in driveable)
     perimeter_kept = sum(1 for stall in ring_stalls if id(stall) in driveable_set)
+    access_pts = access_points_on_street_edge(street_edge) if street_edge else []
 
     return {
         "stalls": driveable,
@@ -1324,19 +1431,18 @@ def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_po
         "ring_inner_poly": ring_meta.get("ring_inner_poly"),
         "ortho_bonus": 1 if ring_meta["ring_mode"] == "ortho" else 0,
         "long_aisle_bonus": 1 if ring_meta.get("long_aisle") else 0,
+        "access_points": access_pts,
+        "access_clear": DRIVEWAY_CLEAR,
     }
 
 
 def candidate_score(candidate):
-    """Stall count first; prefer orthogonal rings and long-axis island aisles."""
+    """Stall count / site fill first. Do not reward tiny ortho cut-downs."""
     if candidate is None:
         return -1
-    # Orthogonal rings are always 90 degree turns — prefer them strongly over
-    # site-following loops that only barely clear the no-acute test.
     return (
         candidate["stall_count"]
-        + (12 if candidate.get("ortho_bonus") else 0)
-        + (3 if candidate.get("long_aisle_bonus") else 0)
+        + (2 if candidate.get("long_aisle_bonus") else 0)
     )
 
 
@@ -1418,6 +1524,7 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
                 }
                 candidate = compose_candidate(
                     ring_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+                    street_edge,
                 )
                 best = better_candidate(best, candidate)
 
@@ -1475,13 +1582,14 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
             }
             candidate = compose_candidate(
                 perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+                street_edge,
             )
             best = better_candidate(best, candidate)
     return best
 
 
 def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs, street_edge=None):
-    """Trial-and-error over orientation, orthogonal ring, then offset ring."""
+    """Trial-and-error: site-following ring first, ortho only as a fallback fill."""
     origin = polygon_centroid(polygon)
     orientations = candidate_orientations(polygon, access_points, street_edge)
     geometries = [module_geometry(angle, flow, stall_width) for angle, flow in park_configs]
@@ -1490,15 +1598,16 @@ def _search_layouts(polygon, z, setback, access_points, stall_width, park_config
     for angle in orientations:
         basis = make_basis(origin, angle)
         for geometry in geometries:
-            ortho = try_ortho_layouts(
-                polygon, basis, z, setback, geometry, stall_width, street_edge,
-            )
-            best = better_candidate(best, ortho)
-
+            # Prefer rings that follow the parcel so the site is not over-cut.
             offset = try_offset_layouts(
                 polygon, basis, z, setback, geometry, stall_width, street_edge,
             )
             best = better_candidate(best, offset)
+
+            ortho = try_ortho_layouts(
+                polygon, basis, z, setback, geometry, stall_width, street_edge,
+            )
+            best = better_candidate(best, ortho)
 
     return best
 
@@ -1526,10 +1635,19 @@ def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH
 
 
 def ring_band_points(polygon, z, outer_distance, inner_distance):
-    """Return the ring drive as (outer, inner) closed point lists."""
+    """Return the ring drive as (outer, inner) closed point lists.
+
+    Acute tips are chamfered so the drive never asks for a sub-90 turn, while
+    still following the site instead of collapsing to a tiny rectangle.
+    """
     outer = offset_polygon(polygon, outer_distance)
     inner = offset_polygon(polygon, inner_distance)
     if not outer or not inner:
+        return None, None
+
+    outer = chamfer_acute_corners(outer)
+    inner = chamfer_acute_corners(inner)
+    if len(outer) < 3 or len(inner) < 3:
         return None, None
 
     outer_points = [(x, y, z) for x, y in outer]

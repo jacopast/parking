@@ -14,6 +14,7 @@ perimeter stall row; the inside is filled with a double-loaded module grid.
 Short or unconnected bay runs are trimmed away. No text is drawn.
 """
 
+import math
 import os
 import sys
 
@@ -145,8 +146,8 @@ def draw_street_edge(street_edge, z):
     return created
 
 
-def draw_access(polygon, z, layout, access_points):
-    """Draw curb-cut links from the street edge into the ring (no circle markers)."""
+def draw_access(polygon, z, layout, access_points, street_edge=None):
+    """Draw entry/exit driveway throats from the street into the ring."""
     created = []
     outer, inner = core.layout_ring_polylines(layout, polygon, z)
     ring_center = None
@@ -158,8 +159,17 @@ def draw_access(polygon, z, layout, access_points):
     elif layout.get("ring_mode") != "ortho":
         ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
 
-    if not ring_center:
+    if not ring_center or not access_points:
         return created
+
+    clear = layout.get("access_clear", core.DRIVEWAY_CLEAR)
+    # Street-direction unit vector for driveway width.
+    sx = sy = 0.0
+    if street_edge:
+        sax, say = street_edge["a"]
+        sbx, sby = street_edge["b"]
+        sl = math.hypot(sbx - sax, sby - say) or 1.0
+        sx, sy = (sbx - sax) / sl, (sby - say) / sl
 
     for point in access_points:
         access = core.as_tuple(point)
@@ -168,12 +178,28 @@ def draw_access(polygon, z, layout, access_points):
             distance = (x - access[0]) ** 2 + (y - access[1]) ** 2
             if nearest is None or distance < nearest[0]:
                 nearest = (distance, (x, y))
+        if not nearest:
+            continue
 
-        if nearest:
-            link = rs.AddLine((access[0], access[1], z), (nearest[1][0], nearest[1][1], z))
-            if link:
-                rs.ObjectLayer(link, LAYERS["circulation"])
-                created.append(link)
+        tx, ty = nearest[1]
+        # Centerline into the ring.
+        center = rs.AddLine((access[0], access[1], z), (tx, ty, z))
+        if center:
+            rs.ObjectLayer(center, LAYERS["circulation"])
+            created.append(center)
+
+        # Two edge lines showing the clear driveway width (no parking in between).
+        if street_edge:
+            half = clear * 0.5
+            for sign in (-1.0, 1.0):
+                ox, oy = sx * half * sign, sy * half * sign
+                edge = rs.AddLine(
+                    (access[0] + ox, access[1] + oy, z),
+                    (tx + ox, ty + oy, z),
+                )
+                if edge:
+                    rs.ObjectLayer(edge, LAYERS["circulation"])
+                    created.append(edge)
 
     return created
 
@@ -204,7 +230,7 @@ def draw_layout(boundary_id, street_edge, setback):
 
     created.extend(draw_ring(polygon, z, layout))
     created.extend(draw_street_edge(street_edge, z))
-    created.extend(draw_access(polygon, z, layout, access_points))
+    created.extend(draw_access(polygon, z, layout, access_points, street_edge))
     created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
 
     for aisle in layout["aisles"]:
