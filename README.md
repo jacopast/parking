@@ -118,6 +118,7 @@ It generates:
 Parking Layout::Available Area
 Parking Layout::Stalls
 Parking Layout::Aisles
+Parking Layout::Islands
 Parking Layout::Circulation
 Parking Layout::Curbs
 ```
@@ -169,10 +170,11 @@ The packer automates the usual sketching loop:
 2. Seat an **orthogonal circulation racetrack** in that frame so the drive has no oblique corners relative to the stalls.
 3. Place a perimeter stall row on the **outside** of the ring only (backs toward the setback). Skip the street frontage and acute corners.
 4. Fill **everything inside the ring** with a 90 degree double-loaded module grid. Prefer island aisles along the long core axis.
-5. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Drop stalls in sharp tips where a car cannot back out.
-6. Circulation may follow the site. **Obtuse aisle corners are fine**; only acute corners (< 90°) are chamfered or rejected. Do not shrink the whole lot to a tiny rectangle just to force 90° turns.
-7. Leave clear **entry/exit driveway throats** on the street frontage with no stalls in those openings.
-8. Keep the trial with the most driveable stalls (site fill first).
+5. Reserve **terminal (end-cap) landscape islands** at both ends of every parking row so the cross-aisle turn stays clear. Long runs also get interior islands so no more than **10 stalls** sit in a row without a break.
+6. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Drop stalls in sharp tips where a car cannot back out.
+7. Circulation may follow the site. **Obtuse aisle corners are fine**; only acute corners (< 90°) are chamfered or rejected. Do not shrink the whole lot to a tiny rectangle just to force 90° turns.
+8. Leave clear **entry/exit driveway throats** on the street frontage with no stalls in those openings.
+9. Keep the trial with the most driveable stalls (site fill first).
 
 Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 

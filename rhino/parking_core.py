@@ -22,7 +22,11 @@ Surface lots are planned the way practitioners iterate a sketch:
    whole site down to a tiny rectangle.
 7. Leave clear entry/exit openings on the street frontage — no stalls in
    the driveway throats.
-8. Keep the candidate with the most driveable stalls. Long-axis island
+8. Reserve terminal (end-cap) landscape islands at both ends of every
+   parking row so the turn into the cross aisle stays clear. Long runs
+   also get interior islands so no more than ten stalls sit in a row
+   without a break.
+9. Keep the candidate with the most driveable stalls. Long-axis island
    aisles get a small tie-break bonus.
 
 Module widths come from Iowa SUDAS 8B-1 Table 8B-1.02 (ULI/NPA). They set
@@ -50,6 +54,12 @@ ACUTE_CORNER_DEG = 80.0
 ACUTE_KEEP_OUT = STALL_STRIPE + AISLE_WIDTH * 0.5
 # Drive aisles / ring loops must not ask for a turn sharper than a right angle.
 MIN_DRIVE_CORNER_DEG = 90.0
+# End-cap / terminal islands replace the last stall column(s) at each row
+# end so cars can turn at the aisle intersection. Width tracks the stall
+# pitch (codes often cite 6x6 min or ~11 ft landscape islands).
+TERMINAL_ISLAND_COLUMNS = 1
+# Maximum consecutive stalls between landscape islands in a run.
+MAX_STALLS_BETWEEN_ISLANDS = 10
 
 AISLE_WIDTHS = {
     (90, "two-way"): 24.0,
@@ -987,6 +997,43 @@ def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_ph
     return columns
 
 
+def run_column_roles(column_count):
+    """Mark terminal / interior island columns vs stalls along one bay run.
+
+    Terminal islands sit at both ends so the cross-aisle turn stays clear.
+    Interior islands break long stretches (max MAX_STALLS_BETWEEN_ISLANDS).
+    Returns None when the run is too short for end-caps plus a usable bay.
+    """
+    ends = TERMINAL_ISLAND_COLUMNS
+    if column_count < ends * 2 + MIN_RUN_COLUMNS:
+        return None
+
+    roles = ["stall"] * column_count
+    for index in range(ends):
+        roles[index] = "terminal"
+        roles[column_count - 1 - index] = "terminal"
+
+    stall_run = 0
+    for index in range(ends, column_count - ends):
+        if stall_run >= MAX_STALLS_BETWEEN_ISLANDS:
+            roles[index] = "interior"
+            stall_run = 0
+        else:
+            stall_run += 1
+
+    if roles.count("stall") < MIN_RUN_COLUMNS:
+        return None
+    return roles
+
+
+def island_from_local_shape(basis, shape, z):
+    """World-space closed curb loop for one stall-stripe landscape island."""
+    return [
+        (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
+        for su, sv in shape
+    ]
+
+
 def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, max_u, u_phase, z):
     columns = bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_phase)
     runs = []
@@ -1001,18 +1048,27 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
 
     stalls = []
     aisles = []
+    islands = []
     run_count = 0
     v_aisle = v + geometry["row_depth"]
     aisle_depth = geometry["aisle"]
 
     for start, end in runs:
-        if end - start < MIN_RUN_COLUMNS:
+        roles = run_column_roles(end - start)
+        if roles is None:
             continue
 
-        left_u = columns[start][0]
-        right_u = columns[end - 1][0] + geometry["stall_pitch"]
+        # Stall span for aisle extent — islands still sit inside this bay.
+        stall_indices = [start + offset for offset, role in enumerate(roles) if role == "stall"]
+        if not stall_indices:
+            continue
+        left_u = columns[stall_indices[0]][0]
+        right_u = columns[stall_indices[-1]][0] + geometry["stall_pitch"]
+        # Keep aisle covering terminal islands too so the bay still meets the ring.
+        bay_left_u = columns[start][0]
+        bay_right_u = columns[end - 1][0] + geometry["stall_pitch"]
         aisle_left, aisle_right = extend_aisle_to_ring(
-            polygon, basis, left_u, right_u, v_aisle, aisle_depth, clearance, min_u, max_u,
+            polygon, basis, bay_left_u, bay_right_u, v_aisle, aisle_depth, clearance, min_u, max_u,
         )
 
         # A bay is usable when its aisle can reach the ring (after extension).
@@ -1025,12 +1081,17 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
         if not connected:
             continue
 
-        for index in range(start, end):
-            for shape in columns[index][2]:
-                stalls.append([
-                    (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
-                    for su, sv in shape
-                ])
+        for offset, role in enumerate(roles):
+            index = start + offset
+            shapes = columns[index][2]
+            if role == "stall":
+                for shape in shapes:
+                    stalls.append(island_from_local_shape(basis, shape, z))
+            else:
+                # End-cap / interior islands occupy the stall stripe only —
+                # the drive aisle stays open for turning at the row end.
+                for shape in shapes:
+                    islands.append(island_from_local_shape(basis, shape, z))
 
         aisles.append(rectangle_world(
             basis,
@@ -1042,7 +1103,7 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
         ))
         run_count += 1
 
-    return stalls, aisles, run_count
+    return stalls, aisles, islands, run_count
 
 
 def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
@@ -1053,6 +1114,7 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
 
     stalls = []
     aisles = []
+    islands = []
     run_count = 0
 
     start_v = min_v + (v_phase % period)
@@ -1062,25 +1124,27 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     v = start_v
     while v <= max_v + 0.001:
         if v + geometry["double_module"] <= max_v + 0.001:
-            bay_stalls, bay_aisles, bay_runs = place_bay_runs(
+            bay_stalls, bay_aisles, bay_islands, bay_runs = place_bay_runs(
                 polygon, basis, v, geometry, 2, geometry["double_module"],
                 clearance, min_u, max_u, u_phase, z,
             )
             if bay_runs:
                 stalls.extend(bay_stalls)
                 aisles.extend(bay_aisles)
+                islands.extend(bay_islands)
                 run_count += bay_runs
                 v += geometry["double_module"]
                 continue
 
         if v + geometry["single_module"] <= max_v + 0.001:
-            bay_stalls, bay_aisles, bay_runs = place_bay_runs(
+            bay_stalls, bay_aisles, bay_islands, bay_runs = place_bay_runs(
                 polygon, basis, v, geometry, 1, geometry["single_module"],
                 clearance, min_u, max_u, u_phase, z,
             )
             if bay_runs:
                 stalls.extend(bay_stalls)
                 aisles.extend(bay_aisles)
+                islands.extend(bay_islands)
                 run_count += bay_runs
                 v += geometry["single_module"]
                 continue
@@ -1093,6 +1157,7 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     return {
         "stalls": stalls,
         "aisles": aisles,
+        "islands": islands,
         "stall_count": len(stalls),
         "run_count": run_count,
         "angle": basis["angle"],
@@ -1190,11 +1255,15 @@ def stalls_along_world_edge(
     stall_width=STALL_WIDTH, depth=STALL_STRIPE, occupied=None, min_clearance=0.0,
     street_edge=None, skip_street_edge=False,
 ):
-    """Place a 90 degree stall row along a world-space edge."""
+    """Place a 90 degree stall row along a world-space edge.
+
+    End-cap islands reserve the first/last column(s) for turning clearance.
+    """
     occupied = occupied if occupied is not None else []
     edge_length = math.hypot(bx - ax, by - ay)
-    if edge_length < stall_width * MIN_RUN_COLUMNS:
-        return [], occupied
+    min_slots = TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
+    if edge_length < stall_width * min_slots:
+        return [], occupied, []
 
     if skip_street_edge and street_edge:
         sa, sb = street_edge["a"], street_edge["b"]
@@ -1203,19 +1272,24 @@ def stalls_along_world_edge(
             distance_to_segment(ax, ay, sa[0], sa[1], sb[0], sb[1]) < 1.0
             and distance_to_segment(bx, by, sa[0], sa[1], sb[0], sb[1]) < 1.0
         ):
-            return [], occupied
+            return [], occupied, []
 
     dx = (bx - ax) / edge_length
     dy = (by - ay) / edge_length
     extend_len = math.hypot(extend_x, extend_y)
     if extend_len < 1e-9:
-        return [], occupied
+        return [], occupied, []
     nx = extend_x / extend_len
     ny = extend_y / extend_len
 
     count = int((edge_length - 0.001) / stall_width)
+    roles = run_column_roles(count)
+    if roles is None:
+        return [], occupied, []
+
     margin = (edge_length - count * stall_width) * 0.5
     stalls = []
+    islands = []
 
     for slot in range(count):
         t = margin + slot * stall_width
@@ -1224,6 +1298,7 @@ def stalls_along_world_edge(
         corners = stall_corners_world(base_x, base_y, dx, dy, nx, ny, stall_width, depth)
         mid_x = sum(c[0] for c in corners) / 4.0
         mid_y = sum(c[1] for c in corners) / 4.0
+        role = roles[slot]
 
         if point_on_street_frontage(mid_x, mid_y, street_edge):
             continue
@@ -1243,21 +1318,27 @@ def stalls_along_world_edge(
         if any(convex_overlap(corners, other) for other in occupied):
             continue
 
-        stall = [(x, y, z) for x, y in corners]
+        poly = [(x, y, z) for x, y in corners]
+        if role != "stall":
+            occupied.append(corners)
+            islands.append(poly)
+            continue
+
         # Require the 24 ft backout aisle now, against already accepted stalls.
         occupied_stalls = [[(p[0], p[1], z) for p in quad] for quad in occupied]
-        if not stall_has_maneuvering_aisle(stall, site_polygon, occupied_stalls):
+        if not stall_has_maneuvering_aisle(poly, site_polygon, occupied_stalls):
             continue
 
         occupied.append(corners)
-        stalls.append(stall)
+        stalls.append(poly)
 
-    return stalls, occupied
+    return stalls, occupied, islands
 
 
 def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH, street_edge=None):
     """Offset-ring helper: stalls backing onto a constant-offset contour."""
     stalls = []
+    islands = []
     placed = placed if placed is not None else []
     count = len(polygon)
     street_index = street_edge["index"] if street_edge else None
@@ -1270,7 +1351,8 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
         ax, ay = polygon[index]
         bx, by = polygon[(index + 1) % count]
         edge_length = math.hypot(bx - ax, by - ay)
-        if edge_length < stall_width * 2:
+        min_slots = TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
+        if edge_length < stall_width * min_slots:
             continue
 
         dx = (bx - ax) / edge_length
@@ -1282,6 +1364,9 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
             nx, ny = -nx, -ny
 
         stall_count = int((edge_length - 0.001) / stall_width)
+        roles = run_column_roles(stall_count)
+        if roles is None:
+            continue
         margin = (edge_length - stall_count * stall_width) * 0.5
 
         for slot in range(stall_count):
@@ -1309,15 +1394,21 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
             if any(convex_overlap(corners, other) for other in placed):
                 continue
 
-            stall = [(x, y, z) for x, y in corners]
+            poly = [(x, y, z) for x, y in corners]
+            role = roles[slot]
+            if role != "stall":
+                placed.append(corners)
+                islands.append(poly)
+                continue
+
             occupied_stalls = [[(p[0], p[1], z) for p in quad] for quad in placed]
-            if not stall_has_maneuvering_aisle(stall, polygon, occupied_stalls):
+            if not stall_has_maneuvering_aisle(poly, polygon, occupied_stalls):
                 continue
 
             placed.append(corners)
-            stalls.append(stall)
+            stalls.append(poly)
 
-    return stalls, placed
+    return stalls, placed, islands
 
 
 def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
@@ -1325,6 +1416,7 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
     """Perimeter stalls on the outside of an orthogonal racetrack only."""
     occupied = []
     stalls = []
+    islands = []
 
     outer_edges = [
         ((ru0, rv0), (ru1, rv0), (0.0, -1.0)),
@@ -1358,14 +1450,15 @@ def ortho_ring_stalls(basis, site_polygon, z, ru0, ru1, rv0, rv1,
         bx, by = to_world(basis, b[0], b[1])
         out_x = basis["u"][0] * local_out[0] + basis["v"][0] * local_out[1]
         out_y = basis["u"][1] * local_out[0] + basis["v"][1] * local_out[1]
-        row, occupied = stalls_along_world_edge(
+        row, occupied, row_islands = stalls_along_world_edge(
             ax, ay, bx, by, out_x, out_y,
             site_polygon, z, stall_width, STALL_STRIPE, occupied, setback,
             street_edge=street_edge, skip_street_edge=True,
         )
         stalls.extend(row)
+        islands.extend(row_islands)
 
-    return stalls
+    return stalls, islands
 
 
 def stall_blocks_street_access(stall, street_edge, clear=DRIVEWAY_CLEAR):
@@ -1394,7 +1487,10 @@ def filter_street_access_stalls(stalls, street_edge):
     ]
 
 
-def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_polygon, street_edge=None):
+def compose_candidate(
+    ring_stalls, interior, basis, geometry, ring_meta, site_polygon,
+    street_edge=None, ring_islands=None,
+):
     # Acute drive corners are rejected; obtuse corners are fine.
     if not ring_drive_is_acceptable(
         ring_meta.get("ring_outer_poly"),
@@ -1412,10 +1508,14 @@ def compose_candidate(ring_stalls, interior, basis, geometry, ring_meta, site_po
     driveable_set = set(id(stall) for stall in driveable)
     perimeter_kept = sum(1 for stall in ring_stalls if id(stall) in driveable_set)
     access_pts = access_points_on_street_edge(street_edge) if street_edge else []
+    islands = list(ring_islands or [])
+    if interior:
+        islands.extend(interior.get("islands") or [])
 
     return {
         "stalls": driveable,
         "aisles": interior["aisles"] if interior else [],
+        "islands": islands,
         "stall_count": len(driveable),
         "run_count": interior["run_count"] if interior else 0,
         "angle": basis["angle"],
@@ -1489,8 +1589,9 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
                     continue
 
             ring_stalls = []
+            ring_islands = []
             if use_outer:
-                ring_stalls = ortho_ring_stalls(
+                ring_stalls, ring_islands = ortho_ring_stalls(
                     basis, polygon, z,
                     ru0, ru1, rv0, rv1,
                     stall_width, setback, street_edge,
@@ -1524,7 +1625,7 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
                 }
                 candidate = compose_candidate(
                     ring_stalls, interior, pack_basis, geometry, ring_meta, polygon,
-                    street_edge,
+                    street_edge, ring_islands=ring_islands,
                 )
                 best = better_candidate(best, candidate)
 
@@ -1533,7 +1634,7 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
 
 def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH, street_edge=None):
     """Site-following ring: outer stalls only, then grid inside the ring."""
-    outer_row, _placed = perimeter_row(
+    outer_row, _placed, outer_islands = perimeter_row(
         polygon, z, setback, None, stall_width, street_edge=street_edge,
     )
     ring_outer = setback + STALL_STRIPE
@@ -1541,8 +1642,8 @@ def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH, street_e
     variants = []
     if outer_row:
         # Clearance = inner curb of the ring; interior grid fills from there in.
-        variants.append((outer_row, ring_outer, ring_outer + RING_WIDTH))
-    variants.append(([], setback, setback + RING_WIDTH))
+        variants.append((outer_row, outer_islands, ring_outer, ring_outer + RING_WIDTH))
+    variants.append(([], [], setback, setback + RING_WIDTH))
     return variants
 
 
@@ -1553,7 +1654,7 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     span_u = max_u - min_u
     span_v = max_v - min_v
 
-    for perimeter_stalls, ring_outer, clearance in build_offset_variants(
+    for perimeter_stalls, perimeter_islands, ring_outer, clearance in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
         # Try both island directions; prefer aisles along the longer site axis.
@@ -1582,7 +1683,7 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
             }
             candidate = compose_candidate(
                 perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
-                street_edge,
+                street_edge, ring_islands=perimeter_islands,
             )
             best = better_candidate(best, candidate)
     return best
@@ -1891,6 +1992,8 @@ def interior_landscape_island_curbs(site_polygon, z, layout, cell=9.0):
 
     drive_polys = [as_xy_polygon(aisle) for aisle in layout.get("aisles", [])]
     stall_polys = [as_xy_polygon(stall) for stall in layout.get("stalls", [])]
+    # Explicit terminal / interior islands already have curbs; skip leftovers there.
+    island_polys = [as_xy_polygon(island) for island in layout.get("islands", [])]
 
     min_x = min(p[0] for p in inner_2d)
     max_x = max(p[0] for p in inner_2d)
@@ -1911,7 +2014,11 @@ def interior_landscape_island_curbs(site_polygon, z, layout, cell=9.0):
                 continue
             if not point_inside(site_polygon, x, y):
                 continue
-            if _point_in_any(x, y, drive_polys) or _point_in_any(x, y, stall_polys):
+            if (
+                _point_in_any(x, y, drive_polys)
+                or _point_in_any(x, y, stall_polys)
+                or _point_in_any(x, y, island_polys)
+            ):
                 continue
             empty[row][col] = True
 
@@ -1991,6 +2098,7 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
     - setback / perimeter landscape curb (gapped at street entries)
     - ring faces (drive aisle curb lines)
     - chained stall-back curbs
+    - terminal / interior end-of-row landscape islands
     - interior non-drive landscape islands inside the ring
     - acute-corner keep-out pockets
     """
@@ -2011,6 +2119,10 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
             curbs.append(inner_closed)
 
     curbs.extend(stall_back_curbs(layout.get("stalls", []), site_polygon, z))
+    for island in layout.get("islands", []):
+        closed = _closed_xyz(as_xy_polygon(island), z)
+        if closed:
+            curbs.append(closed)
     curbs.extend(interior_landscape_island_curbs(site_polygon, z, layout))
     curbs.extend(acute_corner_pocket_curbs(site_polygon, z))
 

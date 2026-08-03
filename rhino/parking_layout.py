@@ -47,6 +47,7 @@ LAYERS = {
     "aisles": "Parking Layout::Aisles",
     "circulation": "Parking Layout::Circulation",
     "curbs": "Parking Layout::Curbs",
+    "islands": "Parking Layout::Islands",
     "boundary": "Parking Layout::Available Area",
 }
 
@@ -63,6 +64,7 @@ def setup_layers():
     ensure_layer(LAYERS["aisles"], (61, 90, 128))
     ensure_layer(LAYERS["circulation"], (17, 138, 178))
     ensure_layer(LAYERS["curbs"], (90, 90, 90))
+    ensure_layer(LAYERS["islands"], (76, 140, 84))
     ensure_layer(LAYERS["boundary"], (239, 71, 111))
 
 
@@ -235,6 +237,11 @@ def draw_layout(boundary_id, street_edge, setback):
 
     for aisle in layout["aisles"]:
         object_id = add_polyline(aisle, LAYERS["aisles"])
+        if object_id:
+            created.append(object_id)
+
+    for island in layout.get("islands", []):
+        object_id = add_polyline(island, LAYERS["islands"])
         if object_id:
             created.append(object_id)
 

@@ -224,6 +224,10 @@ def draw_surface(layout):
         object_id = add_polyline(aisle, LAYERS["access"])
         if object_id:
             created.append(object_id)
+    for island in layout.get("islands", []):
+        object_id = add_polyline(island, LAYERS["curbs"])
+        if object_id:
+            created.append(object_id)
     for stall in layout["stalls"]:
         object_id = add_polyline(stall, LAYERS["surface"])
         if object_id:
