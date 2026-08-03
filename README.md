@@ -1,6 +1,6 @@
 # Rhino Plugin Parking
 
-Rhino Plugin Parking is an early feasibility toolkit for generating parking concepts directly inside Rhino. The current repository is intentionally Rhino-first: it contains Rhino Python scripts only, with no browser application or Node development environment.
+Rhino Plugin Parking is a Rhino 8 plug-in for generating early parking concepts directly inside Rhino. It automatically registers a dockable launcher panel and packages the existing Rhino Python generators inside the plug-in, so normal use does not require `RunPythonScript` or a script path.
 
 The immediate goal is to help a design team answer early site-planning questions:
 
@@ -13,20 +13,45 @@ The immediate goal is to help a design team answer early site-planning questions
 
 ```text
 README.md
+plugin/
+  RhinoPluginParking/
+    RhinoPluginParking.csproj
+    ParkingPlugin.cs
+    ParkingPanel.cs
+    ParkingCommands.cs
+    EmbeddedPythonRunner.cs
 rhino/
   parking_feasibility_panel.py
   parking_layout.py
 ```
 
-## Primary workflow: feasibility panel
+## Install in Rhino 8
 
-Use this script for project feasibility studies:
+1. Open the latest successful `Build Rhino plug-in` run on GitHub Actions.
+2. Download the `RhinoPluginParking-installer` artifact.
+3. Extract the artifact, then double-click `RhinoPluginParking.rhi`.
+4. Complete the Rhino installer and restart Rhino.
+5. Open `Panels` in Rhino and select `Parking Feasibility`.
+
+The plug-in loads at Rhino startup and registers three commands:
+
+```text
+ParkingTools
+ParkingFeasibility
+ParkingLayout
+```
+
+`ParkingTools` opens the dockable launcher if it is not already visible. The other two commands start the corresponding generators directly.
+
+## Primary workflow: feasibility generator
+
+Use the `Open Feasibility Generator` button in the `Parking Feasibility` panel for project feasibility studies. The embedded source is:
 
 ```text
 rhino/parking_feasibility_panel.py
 ```
 
-Run it with Rhino's `RunPythonScript` command. It opens a compact panel-style dialog inside Rhino.
+It opens a compact dialog inside Rhino.
 
 ### Inputs
 
@@ -73,9 +98,9 @@ Parking Feasibility::Garage Options
 Parking Feasibility::Stats
 ```
 
-## Secondary workflow: command-style layout script
+## Secondary workflow: direct layout
 
-Use this script for a simpler direct layout test:
+Use the `Run Direct Layout` button for a simpler layout test. The embedded source is:
 
 ```text
 rhino/parking_layout.py
@@ -136,7 +161,7 @@ levels = ceil(deficit / net stalls per level)
 
 This gives a practical first-pass answer on whether a garage is needed and what scale it may require.
 
-## How to run in Rhino
+## Run the Python sources without installing
 
 1. Open the target `.3dm` file in Rhino.
 2. Make sure the usable site boundary is a closed curve or polyline.
@@ -147,7 +172,13 @@ This gives a practical first-pass answer on whether a garage is needed and what 
 
 ## Validation
 
-This repository does not require Node, npm, or a web build.
+This repository does not require Node, npm, or a web build. Building the `.rhp` requires the .NET 8 SDK.
+
+Build the Rhino 8 plug-in:
+
+```bash
+dotnet build plugin/RhinoPluginParking/RhinoPluginParking.csproj --configuration Release
+```
 
 Use Python syntax validation:
 
@@ -181,14 +212,14 @@ Garage output should be treated as a concept-level massing and capacity study on
 
 ## Recommended next steps
 
-1. Convert `parking_feasibility_panel.py` into a compiled Rhino plugin command.
-2. Replace bounding-box based surface layout with a stronger polygon solver.
+1. Replace bounding-box based surface layout with a stronger polygon solver.
+2. Move the feasibility form controls directly into the dockable plug-in panel.
 3. Add garage presets for efficient, typical, and conservative square feet per stall.
 4. Add a simple ramp/core footprint option.
 5. Add option scoring and ranking.
 6. Add support for no-build zones and existing building footprints.
 7. Add export of a clean option summary table.
-8. Package the Rhino workflow through Yak or a standard installer.
+8. Publish signed releases through Rhino Package Manager.
 
 ## Open-source references evaluated
 
