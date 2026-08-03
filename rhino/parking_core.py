@@ -1595,3 +1595,315 @@ def offset_polygon(polygon, distance):
     if len(result) < 3:
         return None
     return result
+
+
+def _poly_xy(points):
+    return [(p[0], p[1]) for p in points]
+
+
+def _closed_xyz(points_xy, z):
+    if not points_xy:
+        return None
+    pts = [(p[0], p[1], z) for p in points_xy]
+    if pts[0][:2] != pts[-1][:2]:
+        pts.append(pts[0])
+    return pts
+
+
+def _point_in_any(x, y, polys):
+    for poly in polys:
+        if len(poly) >= 3 and point_inside(poly, x, y):
+            return True
+    return False
+
+
+def _segment_near_street_gap(ax, ay, bx, by, street_edge, gap=DRIVEWAY_CLEAR):
+    """True if a curb segment crosses a street driveway throat."""
+    if not street_edge:
+        return False
+    for station in access_points_on_street_edge(street_edge):
+        sx, sy = station[0], station[1]
+        if distance_to_segment(sx, sy, ax, ay, bx, by) <= gap * 0.55:
+            return True
+        mid_x = 0.5 * (ax + bx)
+        mid_y = 0.5 * (ay + by)
+        if math.hypot(mid_x - sx, mid_y - sy) <= gap * 0.55:
+            return True
+    return False
+
+
+def split_closed_curb_at_street(polygon_xy, z, street_edge):
+    """Turn a closed curb into open runs, leaving gaps at street curb cuts."""
+    if not polygon_xy or len(polygon_xy) < 3:
+        return []
+    if not street_edge:
+        closed = _closed_xyz(polygon_xy, z)
+        return [closed] if closed else []
+
+    count = len(polygon_xy)
+    runs = []
+    current = []
+    for index in range(count):
+        a = polygon_xy[index]
+        b = polygon_xy[(index + 1) % count]
+        if _segment_near_street_gap(a[0], a[1], b[0], b[1], street_edge):
+            if len(current) >= 2:
+                runs.append([(p[0], p[1], z) for p in current])
+            current = []
+            continue
+        if not current:
+            current.append(a)
+        current.append(b)
+    if len(current) >= 2:
+        runs.append([(p[0], p[1], z) for p in current])
+    return runs
+
+
+def stall_back_edge_xy(stall, site_polygon):
+    """Return the stall's back edge (non-aisle side) as two XY points."""
+    pts = _poly_xy(stall)
+    if len(pts) < 4:
+        return None
+    cx = sum(p[0] for p in pts) / 4.0
+    cy = sum(p[1] for p in pts) / 4.0
+    site_c = polygon_centroid(site_polygon)
+
+    best = None
+    for index in range(4):
+        e0 = pts[index]
+        e1 = pts[(index + 1) % 4]
+        edge_len = math.hypot(e1[0] - e0[0], e1[1] - e0[1])
+        # Back/front edges are the stall-width sides (~9 ft), not the 18 ft depth.
+        if edge_len < STALL_WIDTH * 0.6 or edge_len > STALL_WIDTH * 1.4:
+            continue
+        mx = 0.5 * (e0[0] + e1[0])
+        my = 0.5 * (e0[1] + e1[1])
+        # Prefer the short edge farther from the site centroid (backs to landscape).
+        dist = math.hypot(mx - site_c[0], my - site_c[1])
+        # And whose outward normal points away from centroid.
+        dx = e1[0] - e0[0]
+        dy = e1[1] - e0[1]
+        length = math.hypot(dx, dy) or 1.0
+        nx, ny = -dy / length, dx / length
+        if (mx - cx) * nx + (my - cy) * ny < 0:
+            nx, ny = -nx, -ny
+        away = (mx - site_c[0]) * nx + (my - site_c[1]) * ny
+        score = dist + (5.0 if away > 0 else 0.0)
+        if best is None or score > best[0]:
+            best = (score, e0, e1)
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def chain_collinear_segments(segments, join_tol=0.75, angle_tol_deg=8.0):
+    """Join nearly collinear stall-back segments into longer curb runs."""
+    unused = list(segments)
+    runs = []
+
+    def close(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1]) <= join_tol
+
+    while unused:
+        a, b = unused.pop()
+        run = [a, b]
+        grew = True
+        while grew:
+            grew = False
+            index = 0
+            while index < len(unused):
+                c, d = unused[index]
+                head, tail = run[0], run[-1]
+                attached = None
+                if close(tail, c):
+                    attached = d
+                elif close(tail, d):
+                    attached = c
+                elif close(head, c):
+                    run = list(reversed(run))
+                    attached = d
+                elif close(head, d):
+                    run = list(reversed(run))
+                    attached = c
+                if attached is None:
+                    index += 1
+                    continue
+
+                if len(run) >= 2:
+                    ux = run[-1][0] - run[-2][0]
+                    uy = run[-1][1] - run[-2][1]
+                    vx = attached[0] - run[-1][0]
+                    vy = attached[1] - run[-1][1]
+                    ul = math.hypot(ux, uy) or 1.0
+                    vl = math.hypot(vx, vy) or 1.0
+                    dot = max(-1.0, min(1.0, (ux * vx + uy * vy) / (ul * vl)))
+                    ang = math.degrees(math.acos(dot))
+                    if ang > angle_tol_deg and ang < 180.0 - angle_tol_deg:
+                        index += 1
+                        continue
+
+                run.append(attached)
+                unused.pop(index)
+                grew = True
+                break
+        if len(run) >= 2:
+            runs.append(run)
+    return runs
+
+
+def stall_back_curbs(stalls, site_polygon, z):
+    segments = []
+    for stall in stalls:
+        edge = stall_back_edge_xy(stall, site_polygon)
+        if edge:
+            segments.append(edge)
+    runs = chain_collinear_segments(segments)
+    return [[(p[0], p[1], z) for p in run] for run in runs]
+
+
+def interior_landscape_island_curbs(site_polygon, z, layout, cell=9.0):
+    """Outline non-drive / non-stall pockets inside the ring as curb islands."""
+    _outer, inner = layout_ring_polylines(layout, site_polygon, z)
+    if not inner:
+        return []
+
+    inner_2d = as_xy_polygon(inner)
+    if len(inner_2d) < 3:
+        return []
+
+    drive_polys = [as_xy_polygon(aisle) for aisle in layout.get("aisles", [])]
+    stall_polys = [as_xy_polygon(stall) for stall in layout.get("stalls", [])]
+
+    min_x = min(p[0] for p in inner_2d)
+    max_x = max(p[0] for p in inner_2d)
+    min_y = min(p[1] for p in inner_2d)
+    max_y = max(p[1] for p in inner_2d)
+    if max_x - min_x < cell * 2 or max_y - min_y < cell * 2:
+        return []
+
+    cols = int(math.ceil((max_x - min_x) / cell))
+    rows = int(math.ceil((max_y - min_y) / cell))
+    empty = [[False] * cols for _ in range(rows)]
+
+    for row in range(rows):
+        for col in range(cols):
+            x = min_x + (col + 0.5) * cell
+            y = min_y + (row + 0.5) * cell
+            if not point_inside(inner_2d, x, y):
+                continue
+            if not point_inside(site_polygon, x, y):
+                continue
+            if _point_in_any(x, y, drive_polys) or _point_in_any(x, y, stall_polys):
+                continue
+            empty[row][col] = True
+
+    seen = [[False] * cols for _ in range(rows)]
+    islands = []
+
+    for row in range(rows):
+        for col in range(cols):
+            if not empty[row][col] or seen[row][col]:
+                continue
+            stack = [(row, col)]
+            seen[row][col] = True
+            cells = []
+            while stack:
+                cr, cc = stack.pop()
+                cells.append((cr, cc))
+                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nr, nc = cr + dr, cc + dc
+                    if nr < 0 or nc < 0 or nr >= rows or nc >= cols:
+                        continue
+                    if seen[nr][nc] or not empty[nr][nc]:
+                        continue
+                    seen[nr][nc] = True
+                    stack.append((nr, nc))
+
+            # Ignore tiny leftover slivers; keep real landscape islands.
+            if len(cells) < 4:
+                continue
+            xs = [min_x + (c + 0.5) * cell for _, c in cells]
+            ys = [min_y + (r + 0.5) * cell for r, _ in cells]
+            pad = cell * 0.5
+            u0, u1 = min(xs) - pad, max(xs) + pad
+            v0, v1 = min(ys) - pad, max(ys) + pad
+            if u1 - u0 < STALL_WIDTH or v1 - v0 < STALL_WIDTH:
+                continue
+            islands.append(_closed_xyz([(u0, v0), (u1, v0), (u1, v1), (u0, v1)], z))
+
+    return [island for island in islands if island]
+
+
+def acute_corner_pocket_curbs(site_polygon, z, keep_out=ACUTE_KEEP_OUT):
+    """Small curb loops in sharp tips where stalls/aisles are banned."""
+    curbs = []
+    count = len(site_polygon)
+    for index, _angle, (vx, vy) in acute_vertices(site_polygon):
+        r = min(keep_out * 0.45, 18.0)
+        if r < 6.0 or not point_inside(site_polygon, vx, vy):
+            continue
+        # Move slightly inward from the vertex along the angle bisector.
+        prev = site_polygon[(index - 1) % count]
+        nxt = site_polygon[(index + 1) % count]
+        bax, bay = prev[0] - vx, prev[1] - vy
+        bcx, bcy = nxt[0] - vx, nxt[1] - vy
+        bal = math.hypot(bax, bay) or 1.0
+        bcl = math.hypot(bcx, bcy) or 1.0
+        ix = bax / bal + bcx / bcl
+        iy = bay / bal + bcy / bcl
+        il = math.hypot(ix, iy) or 1.0
+        cx = vx + ix / il * r
+        cy = vy + iy / il * r
+        if not point_inside(site_polygon, cx, cy):
+            continue
+        pocket = [
+            (cx - r * 0.7, cy - r * 0.7),
+            (cx + r * 0.7, cy - r * 0.7),
+            (cx + r * 0.7, cy + r * 0.7),
+            (cx - r * 0.7, cy + r * 0.7),
+        ]
+        curbs.append(_closed_xyz(pocket, z))
+    return curbs
+
+
+def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
+    """Build curb curves along regions cars do not drive through.
+
+    Includes:
+    - setback / perimeter landscape curb (gapped at street entries)
+    - ring faces (drive aisle curb lines)
+    - chained stall-back curbs
+    - interior non-drive landscape islands inside the ring
+    - acute-corner keep-out pockets
+    """
+    curbs = []
+
+    setback_poly = offset_polygon(site_polygon, max(setback, 0.0))
+    if setback_poly:
+        curbs.extend(split_closed_curb_at_street(setback_poly, z, street_edge))
+
+    outer, inner = layout_ring_polylines(layout, site_polygon, z)
+    if outer:
+        outer_xy = as_xy_polygon(outer)
+        # Ring outer is the curb between perimeter field and the drive loop.
+        curbs.extend(split_closed_curb_at_street(outer_xy, z, street_edge))
+    if inner:
+        inner_closed = _closed_xyz(as_xy_polygon(inner), z)
+        if inner_closed:
+            curbs.append(inner_closed)
+
+    curbs.extend(stall_back_curbs(layout.get("stalls", []), site_polygon, z))
+    curbs.extend(interior_landscape_island_curbs(site_polygon, z, layout))
+    curbs.extend(acute_corner_pocket_curbs(site_polygon, z))
+
+    # Drop degenerate runs.
+    cleaned = []
+    for curb in curbs:
+        if not curb or len(curb) < 2:
+            continue
+        length = 0.0
+        for index in range(len(curb) - 1):
+            length += math.hypot(curb[index + 1][0] - curb[index][0], curb[index + 1][1] - curb[index][1])
+        if length >= STALL_WIDTH:
+            cleaned.append(curb)
+    return cleaned

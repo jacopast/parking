@@ -59,6 +59,7 @@ LAYERS = {
     "surface": "Parking Feasibility::Surface",
     "garage": "Parking Feasibility::Garage Options",
     "access": "Parking Feasibility::Access",
+    "curbs": "Parking Feasibility::Curbs",
 }
 
 
@@ -74,6 +75,7 @@ def setup_layers():
     ensure_layer(LAYERS["surface"], (255, 183, 3))
     ensure_layer(LAYERS["garage"], (61, 90, 128))
     ensure_layer(LAYERS["access"], (17, 138, 178))
+    ensure_layer(LAYERS["curbs"], (90, 90, 90))
 
 
 def safe_float(value, fallback):
@@ -229,6 +231,21 @@ def draw_surface(layout):
     return created
 
 
+def draw_curbs(polygon, z, layout, setback, street_edge):
+    created = []
+    for curb in core.build_curb_polylines(polygon, z, layout, setback, street_edge):
+        if not curb or len(curb) < 2:
+            continue
+        closed = (
+            abs(curb[0][0] - curb[-1][0]) < 1e-6
+            and abs(curb[0][1] - curb[-1][1]) < 1e-6
+        )
+        object_id = add_polyline(curb, LAYERS["curbs"], close=closed)
+        if object_id:
+            created.append(object_id)
+    return created
+
+
 def draw_garage_option(option, base_y_offset):
     footprint = [(p[0], p[1] + base_y_offset, p[2]) for p in option["footprint"]]
     object_id = add_polyline(footprint, LAYERS["garage"])
@@ -277,6 +294,7 @@ def run_feasibility(site_curve_id, street_edge, required_stalls, setback, max_le
     surface_stalls = 0
     if surface:
         created.extend(draw_ring(polygon, z, surface))
+        created.extend(draw_curbs(polygon, z, surface, setback, street_edge))
         created.extend(draw_surface(surface))
         surface_stalls = surface["stall_count"]
 
@@ -411,12 +429,12 @@ def run_prompt_fallback():
     if not curve_id:
         return
 
-    polygon, _z = core.boundary_polygon(curve_id, rs)
+    polygon, z = core.boundary_polygon(curve_id, rs)
     if not polygon:
         rs.MessageBox("Could not read the selected site curve.", 16, "Parking Feasibility")
         return
 
-    street_edge = pick_street_edge(curve_id, polygon)
+    street_edge = pick_street_edge(curve_id, polygon, z)
     required = rs.GetInteger("Required parking stalls", DEFAULT_REQUIRED_STALLS, 1)
     if required is None:
         return

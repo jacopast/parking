@@ -45,6 +45,7 @@ LAYERS = {
     "stalls": "Parking Layout::Stalls",
     "aisles": "Parking Layout::Aisles",
     "circulation": "Parking Layout::Circulation",
+    "curbs": "Parking Layout::Curbs",
     "boundary": "Parking Layout::Available Area",
 }
 
@@ -60,6 +61,7 @@ def setup_layers():
     ensure_layer(LAYERS["stalls"], (255, 183, 3))
     ensure_layer(LAYERS["aisles"], (61, 90, 128))
     ensure_layer(LAYERS["circulation"], (17, 138, 178))
+    ensure_layer(LAYERS["curbs"], (90, 90, 90))
     ensure_layer(LAYERS["boundary"], (239, 71, 111))
 
 
@@ -82,6 +84,22 @@ def add_polyline(points, layer, close=True):
     if object_id:
         rs.ObjectLayer(object_id, layer)
     return object_id
+
+
+def draw_curbs(polygon, z, layout, setback, street_edge):
+    created = []
+    for curb in core.build_curb_polylines(polygon, z, layout, setback, street_edge):
+        if not curb or len(curb) < 2:
+            continue
+        # Closed only when the first/last points already match (island loops).
+        closed = (
+            abs(curb[0][0] - curb[-1][0]) < 1e-6
+            and abs(curb[0][1] - curb[-1][1]) < 1e-6
+        )
+        object_id = add_polyline(curb, LAYERS["curbs"], close=closed)
+        if object_id:
+            created.append(object_id)
+    return created
 
 
 def pick_street_edge(boundary_id, polygon, z):
@@ -187,6 +205,7 @@ def draw_layout(boundary_id, street_edge, setback):
     created.extend(draw_ring(polygon, z, layout))
     created.extend(draw_street_edge(street_edge, z))
     created.extend(draw_access(polygon, z, layout, access_points))
+    created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
 
     for aisle in layout["aisles"]:
         object_id = add_polyline(aisle, LAYERS["aisles"])
