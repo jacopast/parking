@@ -1844,6 +1844,7 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
 
     for run in skeleton["runs"]:
         center_v = run["center_v"]
+        island_cells = {}
         for row in run["rows"]:
             # Stalls are struck from the aisle face back to the spine.
             front_v = center_v + row["sign"] * geometry["row_depth"]
@@ -1851,13 +1852,37 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
             for index, role in enumerate(row["roles"]):
                 u = row["u0"] + index * pitch
                 shape = stall_shape(u, front_v, geometry, lean_sign)
-                target = stalls if role == "stall" else islands
-                target.append(island_from_local_shape(basis, shape, z))
+                if role == "stall":
+                    stalls.append(island_from_local_shape(basis, shape, z))
+                else:
+                    # Rows share an absolute column grid.  Hold landscape
+                    # cells until both sides are known so matching terminal
+                    # or divider cells become one continuous 36 ft island,
+                    # rather than two touching 18 ft capsules with a seam.
+                    key = round(u, 6)
+                    island_cells.setdefault(key, []).append(
+                        (row["sign"], u, shape)
+                    )
 
             av0, av1 = _aisle_v_range(geometry, center_v, row["sign"])
             aisles.append(rect_world_polygon(
                 basis, row["u0"], row["u1"], av0, av1, z,
             ))
+
+        depth = geometry["row_depth"]
+        for cells in island_cells.values():
+            signs = set(cell[0] for cell in cells)
+            if -1.0 in signs and 1.0 in signs:
+                u = cells[0][1]
+                shape = [
+                    (u, center_v - depth),
+                    (u + pitch, center_v - depth),
+                    (u + pitch, center_v + depth),
+                    (u, center_v + depth),
+                ]
+                islands.append(island_from_local_shape(basis, shape, z))
+            else:
+                islands.append(island_from_local_shape(basis, cells[0][2], z))
 
         envelopes.append(island_from_local_shape(
             basis, bay_envelope_uv(run, geometry), z,
