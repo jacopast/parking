@@ -66,6 +66,10 @@ TERMINAL_ISLAND_COLUMNS = 1
 MAX_STALLS_BETWEEN_ISLANDS = 10
 # Manual drawing standard for terminal islands and curb returns.
 CURB_FILLET_RADIUS = 5.0
+# Bay islands are drawn with a generous end return, like the manual plan:
+# a 36 ft back-to-back island reads as a capsule, and an uneven nose
+# tapers instead of showing a raw orthogonal step.
+BAY_FILLET_RADIUS = 9.0
 FILLET_ARC_SEGMENTS = 8
 
 AISLE_WIDTHS = {
@@ -1555,21 +1559,198 @@ def strip_common_intervals(polygon, basis, v0, v1):
     return common or []
 
 
-def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
-    """Build double-loaded aisle modules before any stalls are drawn.
+def _cell_inside(region_polygon, basis, u0, u1, v0, v1):
+    """True when a UV cell (one stall or one aisle bite) lies inside region."""
+    if region_polygon is None:
+        return False
+    if u1 - u0 < 0.5 or v1 - v0 < 0.5:
+        return False
+    mid_u = 0.5 * (u0 + u1)
+    mid_v = 0.5 * (v0 + v1)
+    samples = [
+        (u0, v0), (u1, v0), (u1, v1), (u0, v1),
+        (mid_u, v0), (mid_u, v1), (u0, mid_v), (u1, mid_v), (mid_u, mid_v),
+    ]
+    for u, v in samples:
+        x, y = to_world(basis, u, v)
+        if not point_inside(region_polygon, x, y):
+            return False
+    return True
 
-    The core is eroded only perpendicular to the aisle by half the full
-    module (stall + half aisle). It is not shortened 30 ft along the aisle.
-    A centerline segment exists only where the whole 18/24/18 strip fits.
-    Its 24 ft aisle is then extended to the inner-ring curb.
+
+def _longest_true_span(flags):
+    """Longest contiguous run of True as (start, end) with end exclusive."""
+    best = None
+    start = None
+    for index in range(len(flags) + 1):
+        value = flags[index] if index < len(flags) else False
+        if value and start is None:
+            start = index
+        elif not value and start is not None:
+            if best is None or index - start > best[1] - best[0]:
+                best = (start, index)
+            start = None
+    return best
+
+
+def module_column_roles(spans, max_between=MAX_STALLS_BETWEEN_ISLANDS):
+    """Assign terminal / interior island columns across a whole bay island.
+
+    Both rows of a back-to-back bay share one column grid, so interior
+    islands line up across the island the way they do on a drawn plan.
+    Terminal islands cap each row at its own ends, because a tapered parcel
+    makes the two rows different lengths.
     """
-    half_module = geometry["row_depth"] + geometry["aisle"] * 0.5
+    if not spans:
+        return {}
+    start = min(first for first, _last in spans.values())
+    end = max(last for _first, last in spans.values())
+
+    interior_columns = set()
+    column = start + TERMINAL_ISLAND_COLUMNS + max_between
+    while column < end - TERMINAL_ISLAND_COLUMNS:
+        interior_columns.add(column)
+        column += max_between + 1
+
+    roles = {}
+    for sign, (first, last) in spans.items():
+        row = []
+        for column in range(first, last):
+            if (column < first + TERMINAL_ISLAND_COLUMNS
+                    or column >= last - TERMINAL_ISLAND_COLUMNS):
+                row.append("terminal")
+            elif column in interior_columns:
+                row.append("interior")
+            else:
+                row.append("stall")
+        roles[sign] = row
+    return roles
+
+
+def _row_v_range(geometry, center_v, sign):
+    """The 18 ft stall band on one side of a back-to-back bay island."""
+    depth = geometry["row_depth"]
+    if sign < 0:
+        return (center_v - depth, center_v)
+    return (center_v, center_v + depth)
+
+
+def _aisle_v_range(geometry, center_v, sign):
+    """The 24 ft drive aisle serving that stall band."""
+    depth = geometry["row_depth"]
+    aisle = geometry["aisle"]
+    if sign < 0:
+        return (center_v - depth - aisle, center_v - depth)
+    return (center_v + depth, center_v + depth + aisle)
+
+
+def _row_fit_flags(core_polygon, drive_polygon, basis, geometry,
+                   center_v, sign, u_start, count, site_polygon=None):
+    """Per column: does the stall fit AND is there a 24 ft aisle in front?
+
+    Each row is measured on its own. On a tapered parcel the two rows of a
+    bay are not the same length, exactly like the manual drawing, so the
+    ends step with the site edge instead of both rows being cut back to the
+    shortest common rectangle.
+    """
     pitch = geometry["stall_pitch"]
+    sv0, sv1 = _row_v_range(geometry, center_v, sign)
+    av0, av1 = _aisle_v_range(geometry, center_v, sign)
+    flags = []
+    for index in range(count):
+        u0 = u_start + index * pitch
+        u1 = u0 + pitch
+        ok = (
+            _cell_inside(core_polygon, basis, u0, u1, sv0, sv1)
+            and _cell_inside(drive_polygon, basis, u0, u1, av0, av1)
+        )
+        if ok and site_polygon:
+            # R3: an acute tip is a dead zone, interior rows included.
+            cx, cy = to_world(basis, 0.5 * (u0 + u1), 0.5 * (sv0 + sv1))
+            if near_acute_corner(cx, cy, site_polygon):
+                ok = False
+        flags.append(ok)
+    return flags
+
+
+def _build_bay_island(core_polygon, drive_polygon, basis, geometry, center_v,
+                      u_min, u_max, site_polygon=None):
+    """One back-to-back bay island: two rows sharing a spine, aisles outside."""
+    pitch = geometry["stall_pitch"]
+    if u_max - u_min < pitch * (TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS):
+        return None
+    count = int((u_max - u_min + 0.001) / pitch)
+    if count < TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS:
+        return None
+    leftover = (u_max - u_min) - count * pitch
+
+    best = None
+    for phase in (0.0, leftover * 0.5, leftover):
+        u_start = u_min + phase
+        spans = {}
+        for sign in (-1.0, 1.0):
+            flags = _row_fit_flags(
+                core_polygon, drive_polygon, basis, geometry,
+                center_v, sign, u_start, count, site_polygon,
+            )
+            span = _longest_true_span(flags)
+            if span is None:
+                continue
+            if span[1] - span[0] < TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS:
+                continue
+            spans[sign] = span
+        if not spans:
+            continue
+
+        roles = module_column_roles(spans)
+        stall_total = sum(row.count("stall") for row in roles.values())
+        if stall_total <= 0:
+            continue
+        if best is None or stall_total > best[0]:
+            best = (stall_total, u_start, spans, roles)
+
+    if best is None:
+        return None
+
+    stall_total, u_start, spans, roles = best
+    rows = []
+    for sign, (first, last) in sorted(spans.items()):
+        rows.append({
+            "sign": sign,
+            "u0": u_start + first * pitch,
+            "u1": u_start + last * pitch,
+            "roles": roles[sign],
+        })
+
+    return {
+        "center_v": center_v,
+        "u_start": u_start,
+        "rows": rows,
+        "u0": min(row["u0"] for row in rows),
+        "u1": max(row["u1"] for row in rows),
+        "stall_count": stall_total,
+    }
+
+
+def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
+                                drive_polygon=None, site_polygon=None):
+    """Lay out bay islands before any stall is drawn.
+
+    A bay island is the 36 ft back-to-back stall pair the manual drawing
+    uses. Its 24 ft aisles sit outside it and are shared with the next bay
+    or with the perimeter ring drive, which is why the lattice period is
+    still 18 + 24 + 18. Stalls must sit inside the parking core; the aisle
+    in front of them only has to be drivable, so an outer bay may legally
+    be served by the ring instead of by another interior aisle.
+    """
+    if drive_polygon is None:
+        drive_polygon = core_polygon
+    depth = geometry["row_depth"]
     period = geometry["double_module"]
     core_min_u, core_max_u, core_min_v, core_max_v = local_bounds(core_polygon, basis)
-    min_v = core_min_v + half_module
-    max_v = core_max_v - half_module
-    if max_v - min_v < 1.0:
+    min_v = core_min_v + depth
+    max_v = core_max_v - depth
+    if max_v < min_v - 0.001:
         return None
 
     center_v = min_v + (v_phase % period)
@@ -1578,56 +1759,15 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
 
     runs = []
     while center_v <= max_v + 0.001:
-        strip_v0 = center_v - half_module
-        strip_v1 = center_v + half_module
-        for left, right in strip_common_intervals(
-            core_polygon, basis, strip_v0, strip_v1,
-        ):
-            count = int((right - left - 0.001) / pitch)
-            roles = run_column_roles(count)
-            if roles is None:
-                continue
-
-            margin = ((right - left) - count * pitch) * 0.5
-            run_left = left + margin
-            run_right = run_left + count * pitch
-            midpoint = 0.5 * (run_left + run_right)
-
-            core_interval = containing_interval(
-                scanline_intervals(core_polygon, basis, center_v), midpoint,
-            )
-            if not core_interval:
-                continue
-
-            # Extend the 24 ft aisle from the parking envelope to the ring.
-            aisle_v = center_v - geometry["aisle"] * 0.5
-            aisle_left, aisle_right = extend_aisle_to_ring(
-                core_polygon, basis, run_left, run_right,
-                aisle_v, geometry["aisle"], 0.0, core_min_u, core_max_u,
-            )
-            # Clamp to the same core interval; never jump across a concavity.
-            aisle_left = max(aisle_left, core_interval[0])
-            aisle_right = min(aisle_right, core_interval[1])
-            if aisle_right - aisle_left < run_right - run_left - 0.1:
-                continue
-
-            left_connected = abs(aisle_left - core_interval[0]) <= 4.0
-            right_connected = abs(aisle_right - core_interval[1]) <= 4.0
-            if not (left_connected or right_connected):
-                continue
-
-            runs.append({
-                "center_v": center_v,
-                "u0": run_left,
-                "u1": run_right,
-                "count": count,
-                "roles": roles,
-                "aisle_left": aisle_left,
-                "aisle_right": aisle_right,
-                "left_connected": left_connected,
-                "right_connected": right_connected,
-                "stall_count": roles.count("stall") * 2,
-            })
+        if center_v < min_v - 0.001:
+            center_v += period
+            continue
+        run = _build_bay_island(
+            core_polygon, drive_polygon, basis, geometry, center_v,
+            core_min_u, core_max_u, site_polygon,
+        )
+        if run:
+            runs.append(run)
         center_v += period
 
     if not runs:
@@ -1636,46 +1776,93 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
         "runs": runs,
         "module_core": None,
         "connected_run_count": len(runs),
-        "aisle_length": sum(run["aisle_right"] - run["aisle_left"] for run in runs),
+        "aisle_length": sum(run["u1"] - run["u0"] for run in runs),
         "stall_count": sum(run["stall_count"] for run in runs),
         "v_phase": v_phase,
     }
 
 
+def _dedupe_uv(points, tol=0.05):
+    cleaned = []
+    for u, v in points:
+        if cleaned and abs(cleaned[-1][0] - u) < tol and abs(cleaned[-1][1] - v) < tol:
+            continue
+        cleaned.append((u, v))
+    if (len(cleaned) > 1
+            and abs(cleaned[0][0] - cleaned[-1][0]) < tol
+            and abs(cleaned[0][1] - cleaned[-1][1]) < tol):
+        cleaned.pop()
+    return cleaned
+
+
+def bay_envelope_uv(run, geometry):
+    """Closed outline of one bay island, stepping where the rows differ."""
+    depth = geometry["row_depth"]
+    center_v = run["center_v"]
+    lower = None
+    upper = None
+    for row in run["rows"]:
+        if row["sign"] < 0:
+            lower = row
+        else:
+            upper = row
+
+    if lower is None or upper is None:
+        # Single-loaded bay: the island is only 18 ft deep.
+        row = lower or upper
+        sign = -1.0 if lower else 1.0
+        v0, v1 = _row_v_range(geometry, center_v, sign)
+        return _dedupe_uv([
+            (row["u0"], v0), (row["u1"], v0),
+            (row["u1"], v1), (row["u0"], v1),
+        ])
+
+    points = [
+        (lower["u0"], center_v - depth),
+        (lower["u1"], center_v - depth),
+        (lower["u1"], center_v),
+        (upper["u1"], center_v),
+        (upper["u1"], center_v + depth),
+        (upper["u0"], center_v + depth),
+        (upper["u0"], center_v),
+        (lower["u0"], center_v),
+    ]
+    return _dedupe_uv(points)
+
+
 def materialize_module_skeleton(skeleton, basis, geometry, z):
-    """Populate stall stripes and caps around an accepted aisle skeleton."""
+    """Populate stall stripes, end caps and bay outlines around the skeleton."""
     stalls = []
     islands = []
     aisles = []
+    envelopes = []
     pitch = geometry["stall_pitch"]
-    half_aisle = geometry["aisle"] * 0.5
 
     for run in skeleton["runs"]:
         center_v = run["center_v"]
-        lower_front = center_v - half_aisle
-        upper_front = center_v + half_aisle
-        for index, role in enumerate(run["roles"]):
-            u = run["u0"] + index * pitch
-            shapes = [
-                stall_shape(u, lower_front, geometry, -1.0),
-                stall_shape(u, upper_front, geometry, 1.0),
-            ]
-            target = stalls if role == "stall" else islands
-            for shape in shapes:
+        for row in run["rows"]:
+            # Stalls are struck from the aisle face back to the spine.
+            front_v = center_v + row["sign"] * geometry["row_depth"]
+            lean_sign = -row["sign"]
+            for index, role in enumerate(row["roles"]):
+                u = row["u0"] + index * pitch
+                shape = stall_shape(u, front_v, geometry, lean_sign)
+                target = stalls if role == "stall" else islands
                 target.append(island_from_local_shape(basis, shape, z))
 
-        aisles.append(rectangle_world(
-            basis,
-            run["aisle_left"],
-            center_v - half_aisle,
-            run["aisle_right"] - run["aisle_left"],
-            geometry["aisle"],
-            z,
+            av0, av1 = _aisle_v_range(geometry, center_v, row["sign"])
+            aisles.append(rect_world_polygon(
+                basis, row["u0"], row["u1"], av0, av1, z,
+            ))
+
+        envelopes.append(island_from_local_shape(
+            basis, bay_envelope_uv(run, geometry), z,
         ))
 
     return {
         "stalls": stalls,
         "aisles": aisles,
+        "bay_envelopes": envelopes,
         "islands": islands,
         "stall_count": len(stalls),
         "run_count": len(skeleton["runs"]),
@@ -1691,12 +1878,14 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
     }
 
 
-def layout_for_angle(polygon, basis, clearance, z, geometry):
+def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
+                     site_polygon=None):
     # The PDF workflow uses centerline -> full module envelope -> trim ->
     # stalls. Keep the old tile path only for diagonal emergency fallback.
     if geometry["park_angle"] == 90 and clearance <= 0.001:
         period = geometry["double_module"]
-        phases = [period * step / float(V_PHASE_STEPS) for step in range(V_PHASE_STEPS)]
+        steps = max(V_PHASE_STEPS, 12)
+        phases = [period * step / float(steps) for step in range(steps)]
         phases.append(0.0)
         best_skeleton = None
         best_rank = None
@@ -1707,7 +1896,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry):
                 continue
             seen.add(key)
             skeleton = build_module_skeleton_phase(
-                polygon, basis, geometry, phase,
+                polygon, basis, geometry, phase, drive_polygon, site_polygon,
             )
             if skeleton is None:
                 continue
@@ -2115,6 +2304,7 @@ def compose_candidate(
     return {
         "stalls": driveable,
         "aisles": interior["aisles"] if interior else [],
+        "bay_envelopes": interior.get("bay_envelopes", []) if interior else [],
         "islands": islands,
         "module_core": interior.get("module_core") if interior else None,
         "skeleton_runs": interior.get("skeleton_runs", []) if interior else [],
@@ -2218,7 +2408,11 @@ def try_ortho_layouts(polygon, basis, z, setback, geometry, stall_width, street_
                 interior = None
                 if core_w >= MIN_CORE_SPAN and core_h >= geometry["single_module"]:
                     core_poly = rect_polygon_2d(basis, cu0, cu1, cv0, cv1)
-                    interior = layout_for_angle(core_poly, pack_basis, 0.0, z, geometry)
+                    drive_poly = rect_polygon_2d(basis, ru0, ru1, rv0, rv1)
+                    interior = layout_for_angle(
+                        core_poly, pack_basis, 0.0, z, geometry, drive_poly,
+                        polygon,
+                    )
 
                 long_aisle = (
                     (core_w >= core_h and abs((pack_angle - basis["angle"]) % 180.0) < 1.0)
@@ -2248,11 +2442,28 @@ def build_offset_variants(polygon, z, setback, stall_width=STALL_WIDTH, street_e
     )
     ring_outer = setback + STALL_STRIPE
 
+    street_index = street_edge["index"] if street_edge else None
+    perimeter_edges = [
+        setback if index == street_index else ring_outer
+        for index in range(len(polygon))
+    ]
+    bare_edges = [setback] * len(polygon)
+
     variants = []
     if outer_row:
         # Clearance = inner curb of the ring; interior grid fills from there in.
-        variants.append((outer_row, outer_islands, ring_outer, ring_outer + RING_WIDTH))
-    variants.append(([], [], setback, setback + RING_WIDTH))
+        variants.append({
+            "stalls": outer_row,
+            "islands": outer_islands,
+            "ring_outer": ring_outer,
+            "edge_outer": perimeter_edges,
+        })
+    variants.append({
+        "stalls": [],
+        "islands": [],
+        "ring_outer": setback,
+        "edge_outer": bare_edges,
+    })
     return variants
 
 
@@ -2263,20 +2474,27 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     span_u = max_u - min_u
     span_v = max_v - min_v
 
-    for perimeter_stalls, perimeter_islands, ring_outer, clearance in build_offset_variants(
+    for variant in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
+        perimeter_stalls = variant["stalls"]
+        perimeter_islands = variant["islands"]
+        ring_outer = variant["ring_outer"]
         # Establish the ring before any parking grid. The actual chamfered
         # inner curb is the clipping polygon for the aisle skeleton.
         outer_poly, inner_poly = ring_band_points(
             polygon, z, ring_outer, ring_outer + RING_WIDTH,
+            edge_outer=variant["edge_outer"],
         )
         if not outer_poly or not inner_poly:
             continue
 
         pack_basis = basis
         core_poly = as_xy_polygon(inner_poly)
-        interior = layout_for_angle(core_poly, pack_basis, 0.0, z, geometry)
+        drive_poly = as_xy_polygon(outer_poly)
+        interior = layout_for_angle(
+            core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
+        )
         long_aisle = span_u >= span_v
         ring_meta = {
             "ring_mode": "offset",
@@ -2336,6 +2554,9 @@ def _search_layouts(polygon, z, setback, access_points, stall_width, park_config
             }
             for candidate in option_candidates
         ]
+        # Every option is fully developed, so the user can draw any of them
+        # instead of being forced onto the highest count.
+        best["option_layouts"] = option_candidates
     return best
 
 
@@ -2354,21 +2575,44 @@ def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH
         )
 
     if best:
-        best["ada"] = ada_stall_count(best["stall_count"])
-        if street_edge:
-            best["street_edge"] = street_edge
+        for candidate in best.get("option_layouts", []) + [best]:
+            candidate["ada"] = ada_stall_count(candidate["stall_count"])
+            if street_edge:
+                candidate["street_edge"] = street_edge
 
     return best
 
 
-def ring_band_points(polygon, z, outer_distance, inner_distance):
+def option_layouts(layout):
+    """Developed orientation options, best first, for user selection."""
+    if not layout:
+        return []
+    options = list(layout.get("option_layouts") or [])
+    if not options:
+        return [layout]
+    options.sort(key=lambda candidate: candidate["stall_count"], reverse=True)
+    for candidate in options:
+        candidate.setdefault("orientation_options", layout.get("orientation_options", []))
+        candidate.setdefault("option_layouts", options)
+    return options
+
+
+def ring_band_points(polygon, z, outer_distance, inner_distance,
+                     edge_outer=None):
     """Return the ring drive as (outer, inner) closed point lists.
 
     Acute tips are chamfered so the drive never asks for a sub-90 turn, while
     still following the site instead of collapsing to a tiny rectangle.
+    When edge_outer is given, each edge is offset by its own distance.
     """
-    outer = offset_polygon(polygon, outer_distance)
-    inner = offset_polygon(polygon, inner_distance)
+    if edge_outer:
+        outer = offset_polygon_edges(polygon, edge_outer)
+        inner = offset_polygon_edges(
+            polygon, [distance + RING_WIDTH for distance in edge_outer],
+        )
+    else:
+        outer = offset_polygon(polygon, outer_distance)
+        inner = offset_polygon(polygon, inner_distance)
     if not outer or not inner:
         return None, None
 
@@ -2391,6 +2635,47 @@ def layout_ring_polylines(layout, site_polygon, z):
     return ring_band_points(
         site_polygon, z, layout.get("ring_outer", 0.0), layout.get("ring_inner", RING_WIDTH),
     )
+
+
+def offset_polygon_edges(polygon, distances):
+    """Inward offset where every edge carries its own distance.
+
+    The street frontage has no perimeter stall row in front of it, so its
+    ring curb sits at the bare setback while the other edges sit a stall
+    depth further in. A single scalar offset cannot express that.
+    """
+    count = len(polygon)
+    if count < 3 or len(distances) != count:
+        return None
+
+    orientation = 1.0 if signed_area(polygon) > 0.0 else -1.0
+    lines = []
+    for index in range(count):
+        ax, ay = polygon[index]
+        bx, by = polygon[(index + 1) % count]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return None
+        ux, uy = dx / length, dy / length
+        nx, ny = -uy * orientation, ux * orientation
+        distance = distances[index]
+        lines.append((ax + nx * distance, ay + ny * distance, ux, uy))
+
+    result = []
+    for index in range(count):
+        px, py, ux, uy = lines[index - 1]
+        qx, qy, vx, vy = lines[index]
+        denominator = ux * vy - uy * vx
+        if abs(denominator) < 1e-9:
+            result.append((qx, qy))
+            continue
+        t = ((qx - px) * vy - (qy - py) * vx) / denominator
+        result.append((px + ux * t, py + uy * t))
+
+    if len(result) < 3:
+        return None
+    return result
 
 
 def offset_polygon(polygon, distance):
@@ -2549,6 +2834,78 @@ def fillet_closed_polygon(points, z=0.0, radius=CURB_FILLET_RADIUS,
     ):
         result.append(result[0])
     return result
+
+
+def rounded_bay_envelopes(layout, z, radius=BAY_FILLET_RADIUS):
+    """Bay island outlines with generous returns.
+
+    A large return turns the orthogonal step between two unequal rows into
+    the tapered nose a hand drawing shows, and rounds the closed end of the
+    island. fillet_closed_polygon clamps the radius per corner, so short
+    edges still get a proportionate curve.
+    """
+    rounded = []
+    for envelope in layout.get("bay_envelopes", []):
+        curve = fillet_closed_polygon(envelope, z, radius)
+        if curve:
+            rounded.append(curve)
+    return rounded
+
+
+def tip_pocket_islands(site_polygon, layout, z, radius=CURB_FILLET_RADIUS * 1.6):
+    """Small landscape islands in the leftover pocket at an acute tip.
+
+    Cars cannot use the wedge behind a chamfered ring, so the manual plan
+    fills it with planting rather than leaving raw asphalt.
+    """
+    inner = layout.get("ring_inner_poly")
+    if not inner:
+        return []
+    inner_xy = as_xy_polygon(inner)
+    if len(inner_xy) < 3:
+        return []
+
+    islands = []
+    for _index, angle, (vx, vy) in acute_vertices(site_polygon, MIN_DRIVE_CORNER_DEG):
+        # Walk in from the tip along the bisector to the core, then sit the
+        # island just inside it.
+        cx, cy = polygon_centroid(inner_xy)
+        dx, dy = cx - vx, cy - vy
+        length = math.hypot(dx, dy)
+        if length < 1e-6:
+            continue
+        dx, dy = dx / length, dy / length
+
+        anchor = None
+        step = 2.0
+        travelled = 0.0
+        while travelled <= length:
+            px, py = vx + dx * travelled, vy + dy * travelled
+            if point_inside(inner_xy, px, py):
+                anchor = (px + dx * STALL_STRIPE, py + dy * STALL_STRIPE)
+                break
+            travelled += step
+        if anchor is None:
+            continue
+        if not point_inside(inner_xy, anchor[0], anchor[1]):
+            continue
+
+        half = STALL_WIDTH
+        shape = [
+            (anchor[0] - dy * half, anchor[1] + dx * half),
+            (anchor[0] + dx * half * 1.2, anchor[1] + dy * half * 1.2),
+            (anchor[0] + dy * half, anchor[1] - dx * half),
+            (anchor[0] - dx * half * 0.8, anchor[1] - dy * half * 0.8),
+        ]
+        if not all(point_inside(inner_xy, px, py) for px, py in shape):
+            continue
+        occupied = list(layout.get("stalls") or []) + list(layout.get("islands") or [])
+        if any(convex_overlap(shape, _poly_xy(other)) for other in occupied):
+            continue
+        curve = fillet_closed_polygon(shape, z, radius)
+        if curve:
+            islands.append(curve)
+    return islands
 
 
 def rounded_layout_islands(layout, z, radius=CURB_FILLET_RADIUS):

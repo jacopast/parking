@@ -196,6 +196,32 @@ def draw_access(polygon, z, layout, access_points, street_edge=None):
     return created
 
 
+def choose_option(layout):
+    """Let the user take any of the three developed aisle options."""
+    options = core.option_layouts(layout)
+    if len(options) < 2:
+        return layout
+
+    labels = []
+    for index, option in enumerate(options):
+        labels.append("%s. %.0f deg aisles - %s stalls" % (
+            index + 1, option["angle"], option["stall_count"],
+        ))
+
+    picked = rs.ListBox(
+        labels,
+        "Three aisle orientations were developed. Which one should be drawn?",
+        "Parking Layout",
+        labels[0],
+    )
+    if not picked:
+        return options[0]
+    for label, option in zip(labels, options):
+        if label == picked:
+            return option
+    return options[0]
+
+
 def draw_layout(boundary_id, street_edge, setback):
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
@@ -204,6 +230,8 @@ def draw_layout(boundary_id, street_edge, setback):
 
     access_points = core.access_points_on_street_edge(street_edge)
     layout = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
+    if layout:
+        layout = choose_option(layout)
     if not layout:
         rs.MessageBox(
             "No parking bay fits inside the perimeter drive. Try a smaller setback or a larger site.",
@@ -225,8 +253,16 @@ def draw_layout(boundary_id, street_edge, setback):
     created.extend(draw_access(polygon, z, layout, access_points, street_edge))
     created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
 
-    for aisle in layout["aisles"]:
-        object_id = add_polyline(aisle, LAYERS["aisles"])
+    # The drawn bay object is the back-to-back stall island, the way it is
+    # drafted by hand. Its 24 ft aisles are the space between islands and
+    # the perimeter ring, so raw aisle rectangles are not drawn.
+    for envelope in core.rounded_bay_envelopes(layout, z):
+        object_id = add_polyline(envelope, LAYERS["aisles"])
+        if object_id:
+            created.append(object_id)
+
+    for pocket in core.tip_pocket_islands(polygon, layout, z):
+        object_id = add_polyline(pocket, LAYERS["islands"])
         if object_id:
             created.append(object_id)
 

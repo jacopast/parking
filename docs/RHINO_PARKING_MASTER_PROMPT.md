@@ -103,6 +103,10 @@ STEP A — Site + street
 STEP B — Circulation ring FIRST (site-following)
   - Outer ring curb distance from site ≈ S + 18 (if perimeter stalls used)
     OR ≈ S (if no perimeter row variant).
+  - PER-EDGE offset, not one scalar: the street frontage carries no
+    perimeter stall row, so its ring curb sits at S while the other edges
+    sit at S + 18. Offset each edge on its own line and intersect
+    neighbouring offset lines to rebuild the vertices.
   - Ring drive band width = 24 ft.
   - Offset polygon inward; CHAMFER only corners with interior angle < 90°.
   - Obtuse corners stay. Never collapse irregular sites to a tiny ortho
@@ -121,39 +125,51 @@ STEP D — Exactly THREE aisle-orientation options
   3. Dominant non-street site-edge aligned (longest remaining edge)
   Compare all three completed options; pick the best.
 
-STEP E — Module envelope BEFORE stalls (directional 30 ft)
-  For a candidate aisle direction (U along aisle, V across module):
-  - Double-loaded centerline lattice period = 60 ft in V.
-  - A centerline exists only where a FULL 18/24/18 strip fits.
-  - Erode / constrain ONLY perpendicular to the aisle by 30 ft
-    (= 18 stall + 12 half-aisle) on EACH side of the centerline.
-  - Do NOT isotropically inset the whole polygon by 30 ft
-    (that wrongly shortens aisle length).
-  - Use strip intersection: common U intervals of the core across the
-    V-band [center_v - 30, center_v + 30], sampling polygon vertices
-    inside the strip for tapered/concave sites.
+STEP E — Bay islands BEFORE stalls (island-centred, NOT aisle-centred)
+  The drawn module is the 36 ft BACK-TO-BACK STALL ISLAND, exactly as it is
+  drafted by hand. Its 24 ft aisles sit OUTSIDE it and are shared with the
+  next island or with the perimeter ring. The lattice period is still
+  18 + 24 + 18 = 60 ft in V; only the phase differs from an aisle-centred
+  scheme, but the ends and the outermost bay come out completely different.
+  For a candidate direction (U along the island, V across it):
+  - Island band = [center_v - 18, center_v + 18], lattice period 60 ft.
+  - TWO REGIONS, not one:
+      park region  = chamfered INNER ring polygon (stalls may sit here)
+      drive region = chamfered OUTER ring polygon (aisles may sit here)
+    An outer bay is legally served by the ring drive, so it must NOT be
+    required to find a second interior aisle inside the core.
 
-STEP F — Trim / connect aisle to ring
-  - Parking run occupies the U interval where the full strip fits.
-  - Extend ONLY the 24 ft aisle rectangle to the inner-ring curb
-    (grow aisle ends along U until they meet the core boundary).
-  - A run is valid only if the aisle connects to the ring (touches /
-    reaches core boundary at either end).
-  - Reject short/disconnected runs BEFORE creating stalls.
+STEP F — Per-column, per-ROW fitting (this is what makes tapers work)
+  - Walk the shared 9 ft column grid across the island band.
+  - For each column test each row separately:
+      stall cell [u, u+9] x 18 ft   inside PARK region, and
+      aisle cell [u, u+9] x 24 ft   in front of it inside DRIVE region.
+  - Keep the longest contiguous fitting span PER ROW.
+  - DO NOT require one common rectangle across the whole 60 ft strip.
+    That is the bug that truncates every row to the narrowest scanline and
+    leaves tapered parcels half empty.
+  - Two rows of the same island therefore have DIFFERENT lengths on a
+    tapered site, and the island end steps/tapers with the parcel edge.
   - Minimum usable stall columns after end-caps: MIN_RUN_COLUMNS (3).
 
 STEP G — Roles / islands BEFORE filling stalls
-  Along each accepted run (column roles):
-  - First and last TERMINAL_ISLAND_COLUMNS columns = terminal (end-cap) islands
-  - No more than MAX_STALLS_BETWEEN_ISLANDS consecutive stall columns;
-    insert interior islands as needed
-  - Remaining columns = stalls
+  Both rows share ONE absolute column grid:
+  - First and last TERMINAL_ISLAND_COLUMNS columns of EACH row = terminal
+    (end-cap) islands — each row caps at its own end.
+  - Interior islands are placed on shared absolute column indices so they
+    line up across the island; no more than MAX_STALLS_BETWEEN_ISLANDS
+    consecutive stall columns.
+  - Remaining columns = stalls.
   End-caps exist so cars can turn at the cross aisle. Never park into the tip
   of a row at the aisle intersection.
 
 STEP H — Populate stalls LAST
-  - For each stall role column, create BOTH sides of the double-loaded module
-    (upper and lower 18 ft stalls facing the shared 24 ft aisle).
+  - Stalls are struck from the aisle face back to the shared island spine.
+  - Emit a closed BAY ENVELOPE per island (its stepped outline) and draw
+    that, filleted at BAY_FILLET_RADIUS ≈ 9 ft. Do NOT draw raw aisle
+    rectangles: the aisle is the space between islands, and a drawn aisle
+    box sticking out past the last stall is the classic tell that the
+    layout is aisle-centred.
   - Perimeter stalls: single-loaded outside the ring, backs toward setback /
     property edge, fronts toward ring. Skip street-frontage edge entirely.
   - Interior of ring is NOT also single-loaded as a second perimeter ring
@@ -275,6 +291,11 @@ K. street_inward_normal + ray cast for driveway_throat_target.
 ❌ Ban stalls only below 80° while chamfering ring at 90°.
 ❌ Snap access lines to nearest ring vertex (diagonal slash throats).
 ❌ Isotropic 30 ft erosion of the whole core (shortens aisles wrongly).
+❌ Requiring a single common U rectangle for the whole 60 ft module strip
+   (truncates every row to the narrowest scanline on a tapered parcel).
+❌ Aisle-centred modules that force the outermost bay to find an interior
+   aisle instead of being served by the perimeter ring.
+❌ Drawing the aisle rectangle as the module outline.
 ❌ Axis-aligned leftover flood-fill AABBs as “landscape islands”.
 ❌ Treating exact contact with opposing stall front as blocked aisle
    (kills one side of every double-loaded row).
@@ -299,6 +320,12 @@ K. street_inward_normal + ray cast for driveway_throat_target.
 □ Island/curb corners are filleted at nominal R=5 ft.
 □ No ghost large axis-aligned boxes over the center.
 □ Rhino scripts reload parking_core each run.
+□ On a tapered parcel the two rows of a bay have DIFFERENT lengths and the
+  island nose steps/tapers with the site edge.
+□ The outermost bay is served by the perimeter ring, not by a second
+  interior aisle.
+□ All three developed options are selectable by the user, not only the
+  highest stall count.
 
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -318,6 +345,6 @@ Build the toolkit now.
 
 ## One-line core
 
-**Order:** boundary + street → ring → 3 aisle skeletons → 60 ft module envelope (30 ft perpendicular only) → ring connect + end cleanup → island roles → stalls → tip/access QA → R5 fillets → compare valid stall counts.
+**Order:** boundary + street → per-edge ring (park region + drive region) → 3 orientations → 60 ft bay-island lattice → per-column, per-row fit against both regions → shared-grid island roles → stalls → tip/access QA → R5 curb / R9 bay fillets → compare valid stall counts, user picks the option.
 
 **Forbidden:** stall-first-then-delete; tip parking; diagonal access; one-sided double-loaded rows; isotropic 30 ft shrink; leaving acute tips occupied.
