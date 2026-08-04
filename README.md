@@ -169,12 +169,12 @@ The packer follows the same order as a manual parking study:
 1. Fix the site boundary and street frontage.
 2. Establish the **site-following perimeter circulation ring first**. Acute ring corners are chamfered; obtuse corners remain.
 3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
-4. Build exactly **three aisle-skeleton options**: street-perpendicular, street-parallel, and dominant-edge aligned.
-5. Clip each aisle/row skeleton to the inner ring and clean its ends. Disconnected or short runs are rejected before stalls exist.
-6. After the skeleton is valid, populate its stalls and reserve terminal end-cap islands. Long runs get an interior island after every 10 stalls.
-7. Place the perimeter row outside the ring, skipping the street frontage and the full dead zone between each acute site tip and the chamfered ring.
-8. Validate a clear **24 ft** maneuvering aisle and straight inward entry/exit throats.
-9. Compare the three completed, driveable options and return the highest-capacity layout. A fitted orthogonal racetrack is fallback only when no site-following option works.
+4. Inset that core by **30 ft** (18 ft stall + half of the 24 ft aisle). This is the centerline domain where a complete 18/24/18 double-loaded module can fit.
+5. Build exactly **three aisle-centerline options** through that domain: street-perpendicular, street-parallel, and dominant-edge aligned.
+6. Intersect each centerline with the 30 ft inset, then extend only its 24 ft aisle back to the inner-ring curb. This creates the trimmed module envelopes and ring connections shown in the PDF.
+7. Reject disconnected/short centerlines before stalls exist. Then populate both sides, reserving terminal end-cap islands; long runs get an interior island after every 10 stalls.
+8. Place the perimeter row outside the ring, skipping the street frontage and the full dead zone between each acute site tip and the chamfered ring.
+9. Validate maneuvering and compare the three completed options. A fitted orthogonal racetrack is fallback only when no site-following option works.
 
 Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 

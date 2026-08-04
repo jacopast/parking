@@ -1479,7 +1479,203 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     }
 
 
+def scanline_intervals(polygon, basis, v):
+    """Intersect an infinite U-direction line with a polygon in parking UV."""
+    local = [to_local(basis, p[0], p[1]) for p in as_xy_polygon(polygon)]
+    hits = []
+    for index in range(len(local)):
+        u0, v0 = local[index]
+        u1, v1 = local[(index + 1) % len(local)]
+        if abs(v1 - v0) < 1e-9:
+            continue
+        # Half-open edge rule avoids counting polygon vertices twice.
+        if not ((v0 <= v < v1) or (v1 <= v < v0)):
+            continue
+        t = (v - v0) / (v1 - v0)
+        hits.append(u0 + (u1 - u0) * t)
+    hits.sort()
+    intervals = []
+    for index in range(0, len(hits) - 1, 2):
+        if hits[index + 1] - hits[index] > 0.5:
+            intervals.append((hits[index], hits[index + 1]))
+    return intervals
+
+
+def containing_interval(intervals, u):
+    for left, right in intervals:
+        if left - 0.01 <= u <= right + 0.01:
+            return left, right
+    return None
+
+
+def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
+    """Build double-loaded aisle modules before any stalls are drawn.
+
+    The centerline domain is the chamfered inner-ring core eroded by half
+    the full module (stall + half aisle). A centerline segment therefore
+    exists only where the whole 18/24/18 module fits. Its 24 ft aisle is
+    then extended to the inner-ring curb for actual circulation.
+    """
+    half_module = geometry["row_depth"] + geometry["aisle"] * 0.5
+    module_core = offset_polygon(as_xy_polygon(core_polygon), half_module)
+    if not module_core or len(module_core) < 3:
+        return None
+    module_core = chamfer_acute_corners(module_core)
+
+    pitch = geometry["stall_pitch"]
+    period = geometry["double_module"]
+    min_u, max_u, min_v, max_v = local_bounds(module_core, basis)
+    core_min_u, core_max_u, _core_min_v, _core_max_v = local_bounds(core_polygon, basis)
+
+    center_v = min_v + (v_phase % period)
+    while center_v > min_v + 1e-9:
+        center_v -= period
+
+    runs = []
+    while center_v <= max_v + 0.001:
+        for left, right in scanline_intervals(module_core, basis, center_v):
+            count = int((right - left - 0.001) / pitch)
+            roles = run_column_roles(count)
+            if roles is None:
+                continue
+
+            margin = ((right - left) - count * pitch) * 0.5
+            run_left = left + margin
+            run_right = run_left + count * pitch
+            midpoint = 0.5 * (run_left + run_right)
+
+            core_interval = containing_interval(
+                scanline_intervals(core_polygon, basis, center_v), midpoint,
+            )
+            if not core_interval:
+                continue
+
+            # Extend the 24 ft aisle from the parking envelope to the ring.
+            aisle_v = center_v - geometry["aisle"] * 0.5
+            aisle_left, aisle_right = extend_aisle_to_ring(
+                core_polygon, basis, run_left, run_right,
+                aisle_v, geometry["aisle"], 0.0, core_min_u, core_max_u,
+            )
+            # Clamp to the same core interval; never jump across a concavity.
+            aisle_left = max(aisle_left, core_interval[0])
+            aisle_right = min(aisle_right, core_interval[1])
+            if aisle_right - aisle_left < run_right - run_left - 0.1:
+                continue
+
+            left_connected = abs(aisle_left - core_interval[0]) <= 4.0
+            right_connected = abs(aisle_right - core_interval[1]) <= 4.0
+            if not (left_connected or right_connected):
+                continue
+
+            runs.append({
+                "center_v": center_v,
+                "u0": run_left,
+                "u1": run_right,
+                "count": count,
+                "roles": roles,
+                "aisle_left": aisle_left,
+                "aisle_right": aisle_right,
+                "left_connected": left_connected,
+                "right_connected": right_connected,
+                "stall_count": roles.count("stall") * 2,
+            })
+        center_v += period
+
+    if not runs:
+        return None
+    return {
+        "runs": runs,
+        "module_core": module_core,
+        "connected_run_count": len(runs),
+        "aisle_length": sum(run["aisle_right"] - run["aisle_left"] for run in runs),
+        "stall_count": sum(run["stall_count"] for run in runs),
+        "v_phase": v_phase,
+    }
+
+
+def materialize_module_skeleton(skeleton, basis, geometry, z):
+    """Populate stall stripes and caps around an accepted aisle skeleton."""
+    stalls = []
+    islands = []
+    aisles = []
+    pitch = geometry["stall_pitch"]
+    half_aisle = geometry["aisle"] * 0.5
+
+    for run in skeleton["runs"]:
+        center_v = run["center_v"]
+        lower_front = center_v - half_aisle
+        upper_front = center_v + half_aisle
+        for index, role in enumerate(run["roles"]):
+            u = run["u0"] + index * pitch
+            shapes = [
+                stall_shape(u, lower_front, geometry, -1.0),
+                stall_shape(u, upper_front, geometry, 1.0),
+            ]
+            target = stalls if role == "stall" else islands
+            for shape in shapes:
+                target.append(island_from_local_shape(basis, shape, z))
+
+        aisles.append(rectangle_world(
+            basis,
+            run["aisle_left"],
+            center_v - half_aisle,
+            run["aisle_right"] - run["aisle_left"],
+            geometry["aisle"],
+            z,
+        ))
+
+    return {
+        "stalls": stalls,
+        "aisles": aisles,
+        "islands": islands,
+        "stall_count": len(stalls),
+        "run_count": len(skeleton["runs"]),
+        "connected_run_count": skeleton["connected_run_count"],
+        "aisle_length": skeleton["aisle_length"],
+        "skeleton_runs": skeleton["runs"],
+        "module_core": skeleton["module_core"],
+        "angle": basis["angle"],
+        "park_angle": geometry["park_angle"],
+        "flow": geometry["flow"],
+        "u_phase": 0.0,
+        "v_phase": skeleton["v_phase"],
+    }
+
+
 def layout_for_angle(polygon, basis, clearance, z, geometry):
+    # The PDF workflow uses centerline -> full module envelope -> trim ->
+    # stalls. Keep the old tile path only for diagonal emergency fallback.
+    if geometry["park_angle"] == 90 and clearance <= 0.001:
+        period = geometry["double_module"]
+        phases = [period * step / float(V_PHASE_STEPS) for step in range(V_PHASE_STEPS)]
+        phases.append(0.0)
+        best_skeleton = None
+        best_rank = None
+        seen = set()
+        for phase in phases:
+            key = round(phase % period, 3)
+            if key in seen:
+                continue
+            seen.add(key)
+            skeleton = build_module_skeleton_phase(
+                polygon, basis, geometry, phase,
+            )
+            if skeleton is None:
+                continue
+            rank = (
+                skeleton["connected_run_count"],
+                skeleton["aisle_length"],
+                skeleton["stall_count"],
+            )
+            if best_skeleton is None or rank > best_rank:
+                best_skeleton = skeleton
+                best_rank = rank
+        if best_skeleton:
+            return materialize_module_skeleton(
+                best_skeleton, basis, geometry, z,
+            )
+        return None
+
     pitch = geometry["stall_pitch"]
     period = geometry["double_module"]
     min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
@@ -1862,6 +2058,8 @@ def compose_candidate(
         "stalls": driveable,
         "aisles": interior["aisles"] if interior else [],
         "islands": islands,
+        "module_core": interior.get("module_core") if interior else None,
+        "skeleton_runs": interior.get("skeleton_runs", []) if interior else [],
         "stall_count": len(driveable),
         "run_count": interior["run_count"] if interior else 0,
         "connected_run_count": interior.get("connected_run_count", 0) if interior else 0,
