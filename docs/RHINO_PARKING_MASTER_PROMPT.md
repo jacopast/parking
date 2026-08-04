@@ -36,17 +36,19 @@ Units: FEET throughout.
 0. PRODUCT INTENT / UX
 ═══════════════════════════════════════════════════════════════════════════════
 
-User flow in Rhino:
+User flow in Rhino (collect ALL human inputs first, then solve):
 1. Pick ONE OR MORE CLOSED available-area curves (multi-select / preselect OK).
    Each selected curve is a separate site designed independently.
 2. Ask for setback from property line (default 5 ft, min 0) — shared across sites.
-3. If multiple sites: Yes = auto-best orientation per site; No = ListBox per site.
+3. Orientation policy up front: Yes = auto-best per site; No = ListBox after solve.
 4. For EACH site, pick ONE EXISTING EDGE of that curve as street frontage.
    - Do NOT ask the user to draw a new line.
    - Highlight temporary segments of existing edges for selection.
-5. Generate layout curves in layers, grouped per site
-   (`Parking Layout — Site N`). NO model text labels on geometry.
-6. Combined MessageBox summary per site: stall count, perimeter stalls,
+   - Do NOT start computing until every street edge has been picked (or skipped).
+5. Compute all sites. If policy was No, show orientation ListBox per site.
+6. Draw all sites into layers, grouped per site (`Parking Layout — Site N`).
+   NO model text labels on geometry.
+7. Combined MessageBox summary per site: stall count, perimeter stalls,
    aisle orientation, street length, ADA counts.
 
 Layers (Parking Layout):

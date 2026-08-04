@@ -232,11 +232,10 @@ This gives a practical first-pass answer on whether a garage is needed and what 
 2. Make sure each usable site boundary is a closed curve or polyline.
 3. Run `RunPythonScript` and choose `rhino/parking_layout.py`.
 4. Select **one or more** closed available-area curves (preselect works).
-   Each site is designed independently: its own street edge, its own layout,
-   grouped as `Parking Layout — Site N`.
-5. Enter a shared setback. With multiple sites, choose auto-best orientation
-   for every parcel, or pick the aisle option per site.
-6. Review the generated layers and the combined MessageBox summary.
+5. Enter shared setback, then choose auto-best vs pick-orientation policy.
+6. Pick each site's street frontage edge. Calculation starts only after that.
+7. If you chose pick-orientation, select among the scored options per site.
+8. Review the generated layers (`Parking Layout — Site N`) and the summary.
 
 ## Validation
 

@@ -1,13 +1,9 @@
 """Create a driveable surface parking layout inside Rhino.
 
 Run with Rhino's RunPythonScript command. Pick one OR MORE closed usable-area
-curves. Each site is designed independently: for every boundary you pick its
-own street frontage edge, then a layout is generated for that parcel alone.
-
-The layout uses circulation-first packing and the land-use model:
-
-    non-drivable greens (end-caps / tip / setback) create residual 24 ft aisles
-    standing = stalls
+curves. Human inputs are collected first (sites, setback, orientation policy,
+street frontage per site); the solver runs only after those picks are done.
+Each site is designed independently.
 """
 
 import math
@@ -213,19 +209,26 @@ def choose_option(layout, site_label=None, auto_best=False):
     return options[0]
 
 
-def draw_layout(boundary_id, street_edge, setback, site_label=None, auto_best=False):
-    """Generate geometry for ONE site. Call once per selected boundary."""
+def compute_layout(boundary_id, street_edge, setback):
+    """Run the solver only — no Rhino prompts, no drawing."""
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
         return None, "Could not read the selected available area."
 
     access_points = core.access_points_on_street_edge(street_edge)
     layout = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
-    if layout:
-        layout = choose_option(layout, site_label=site_label, auto_best=auto_best)
     if not layout:
         return None, "No parking bay fits inside the perimeter drive."
+    return layout, None
 
+
+def draw_layout_geometry(boundary_id, street_edge, setback, layout, site_label=None):
+    """Draw one already-computed layout into layers / a named group."""
+    polygon, z = core.boundary_polygon(boundary_id, rs)
+    if not polygon:
+        return None, "Could not read the selected available area."
+
+    access_points = core.access_points_on_street_edge(street_edge)
     setup_layers()
     created = []
 
@@ -258,8 +261,21 @@ def draw_layout(boundary_id, street_edge, setback, site_label=None, auto_best=Fa
         if group:
             rs.AddObjectsToGroup(created, group)
 
-    rs.Redraw()
     return layout, None
+
+
+def draw_layout(boundary_id, street_edge, setback, site_label=None, auto_best=False):
+    """Legacy one-shot helper: compute, pick option, draw."""
+    layout, error = compute_layout(boundary_id, street_edge, setback)
+    if error or not layout:
+        return None, error or "No layout."
+    layout = choose_option(layout, site_label=site_label, auto_best=auto_best)
+    drawn, error = draw_layout_geometry(
+        boundary_id, street_edge, setback, layout, site_label=site_label,
+    )
+    if not error:
+        rs.Redraw()
+    return drawn, error
 
 
 def collect_site_curves():
@@ -283,7 +299,49 @@ def collect_site_curves():
     return list(selected)
 
 
+def collect_street_edges(sites):
+    """Pick every site's street frontage before any solver work starts."""
+    jobs = []
+    for site in sites:
+        try:
+            rs.UnselectAllObjects()
+            rs.SelectObject(site["id"])
+        except Exception:
+            pass
+
+        if len(sites) > 1:
+            rs.Prompt(
+                "Inputs first — pick street frontage for %s, then the rest."
+                % site["label"]
+            )
+        else:
+            rs.Prompt("Pick the street frontage edge, then layout will compute.")
+
+        street_edge = pick_street_edge(
+            site["id"], site["polygon"], site["z"], site_label=site["label"],
+        )
+        if not street_edge:
+            jobs.append({
+                "site": site,
+                "street_edge": None,
+                "ok": False,
+                "message": "Street frontage not selected — skipped.",
+            })
+            continue
+        jobs.append({
+            "site": site,
+            "street_edge": street_edge,
+            "ok": True,
+        })
+    try:
+        rs.UnselectAllObjects()
+    except Exception:
+        pass
+    return jobs
+
+
 def main():
+    # ── Phase 1: gather every human input that does not need a solve ──
     boundary_ids = collect_site_curves()
     if not boundary_ids:
         return
@@ -316,68 +374,107 @@ def main():
         rs.MessageBox("No valid closed site curves were selected.", 48, "Parking Layout")
         return
 
-    setback = get_number("Setback from the property line in feet (applied to every site)", DEFAULT_SETBACK, 0.0)
+    setback = get_number(
+        "Setback from the property line in feet (applied to every site)",
+        DEFAULT_SETBACK,
+        0.0,
+    )
     if setback is None:
         return
 
-    auto_best = False
-    if len(sites) > 1:
-        answer = rs.MessageBox(
-            "%s sites selected.\n\n"
-            "Yes = automatically draw the highest-stall option for each site\n"
-            "No  = choose the aisle orientation separately for each site" % len(sites),
-            4 | 32,  # Yes/No + Question
-            "Parking Layout",
-        )
-        # 6 = Yes, 7 = No
-        auto_best = (answer == 6)
+    # Ask orientation policy up front (single- or multi-site).
+    answer = rs.MessageBox(
+        "%s site(s) selected.\n\n"
+        "Yes = automatically draw the highest-stall option for each site\n"
+        "No  = after computing, choose the aisle orientation per site\n\n"
+        "Street edges are picked next; calculation starts only after that."
+        % len(sites),
+        4 | 32,  # Yes/No + Question
+        "Parking Layout",
+    )
+    if answer not in (6, 7):
+        return
+    auto_best = (answer == 6)
 
+    jobs = collect_street_edges(sites)
+    ready = [job for job in jobs if job["ok"]]
+    if not ready:
+        rs.MessageBox("No street frontages were selected.", 48, "Parking Layout")
+        return
+
+    # ── Phase 2: compute every site (no drawing yet) ──
+    rs.Prompt("Computing parking layouts…")
+    for job in ready:
+        site = job["site"]
+        layout, error = compute_layout(site["id"], job["street_edge"], setback)
+        if error or not layout:
+            job["ok"] = False
+            job["message"] = error or "No layout."
+            job["layout"] = None
+        else:
+            job["layout"] = layout
+
+    # ── Phase 3: orientation picks (only input that needs solve scores) ──
+    if not auto_best:
+        for job in ready:
+            if not job.get("ok") or not job.get("layout"):
+                continue
+            job["layout"] = choose_option(
+                job["layout"],
+                site_label=job["site"]["label"],
+                auto_best=False,
+            )
+    else:
+        for job in ready:
+            if job.get("ok") and job.get("layout"):
+                job["layout"] = choose_option(
+                    job["layout"],
+                    site_label=job["site"]["label"],
+                    auto_best=True,
+                )
+
+    # ── Phase 4: draw everything ──
+    rs.Prompt("Drawing parking layouts…")
+    setup_layers()
     results = []
-    for site in sites:
-        # Isolate selection so street-edge picking targets this boundary.
-        try:
-            rs.UnselectAllObjects()
-            rs.SelectObject(site["id"])
-        except Exception:
-            pass
-
-        street_edge = pick_street_edge(
-            site["id"], site["polygon"], site["z"], site_label=site["label"],
-        )
-        if not street_edge:
+    for job in jobs:
+        if not job["ok"]:
             results.append({
-                "label": site["label"],
+                "label": job["site"]["label"],
                 "ok": False,
-                "message": "Street frontage not selected — skipped.",
+                "message": job.get("message") or "Skipped.",
+            })
+            continue
+        if not job.get("layout"):
+            results.append({
+                "label": job["site"]["label"],
+                "ok": False,
+                "message": job.get("message") or "No layout.",
             })
             continue
 
-        layout, error = draw_layout(
-            site["id"],
-            street_edge,
+        layout, error = draw_layout_geometry(
+            job["site"]["id"],
+            job["street_edge"],
             setback,
-            site_label=site["label"],
-            auto_best=auto_best,
+            job["layout"],
+            site_label=job["site"]["label"],
         )
         if error or not layout:
             results.append({
-                "label": site["label"],
+                "label": job["site"]["label"],
                 "ok": False,
-                "message": error or "No layout.",
+                "message": error or "Draw failed.",
             })
             continue
-
         results.append({
-            "label": site["label"],
+            "label": job["site"]["label"],
             "ok": True,
             "layout": layout,
-            "street_edge": street_edge,
+            "street_edge": job["street_edge"],
         })
 
-    try:
-        rs.UnselectAllObjects()
-    except Exception:
-        pass
+    rs.Redraw()
 
     if not results:
         return
