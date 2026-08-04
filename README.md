@@ -171,7 +171,7 @@ The packer automates the usual sketching loop:
 3. Place a perimeter stall row on the **outside** of the ring only (backs toward the setback). Skip the street frontage and acute corners.
 4. Fill **everything inside the ring** with a 90 degree double-loaded module grid. Prefer island aisles along the long core axis.
 5. Reserve **terminal (end-cap) landscape islands** at both ends of every parking row so the cross-aisle turn stays clear. Long runs also get interior islands so no more than **10 stalls** sit in a row without a break.
-6. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Drop stalls in sharp tips where a car cannot back out.
+6. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Drop stalls in sharp tips (≤ 90°) where a car cannot turn — the same tips the ring chamfers. Entry/exit throats project **straight inward** from the street, not diagonally to a ring vertex.
 7. Circulation may follow the site. **Obtuse aisle corners are fine**; only acute corners (< 90°) are chamfered or rejected. Do not shrink the whole lot to a tiny rectangle just to force 90° turns.
 8. Leave clear **entry/exit driveway throats** on the street frontage with no stalls in those openings.
 9. Keep the trial with the most driveable stalls (site fill first).

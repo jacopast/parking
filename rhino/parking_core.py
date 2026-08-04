@@ -48,9 +48,10 @@ MIN_CORE_SPAN = 42.0  # at least one single-loaded module depth
 # Smallest orthogonal racetrack footprint worth seating in a site.
 MIN_RACETRACK_SPAN = RING_WIDTH * 2 + STALL_STRIPE + 24.0
 DRIVEWAY_CLEAR = 28.0
-# Interior angles sharper than this cannot host 90 degree stalls.
-ACUTE_CORNER_DEG = 80.0
-# Keep stalls this far from an acute vertex (stall depth + aisle throat).
+# Interior angles at or below a right angle cannot host 90 degree stalls.
+# Must match MIN_DRIVE_CORNER_DEG so chamfered tips and stall bans agree.
+ACUTE_CORNER_DEG = 90.0
+# Keep stalls this far from a sharp tip (stall depth + aisle throat).
 ACUTE_KEEP_OUT = STALL_STRIPE + AISLE_WIDTH * 0.5
 # Drive aisles / ring loops must not ask for a turn sharper than a right angle.
 MIN_DRIVE_CORNER_DEG = 90.0
@@ -317,11 +318,58 @@ def ring_drive_is_acceptable(ring_outer_poly, ring_inner_poly=None):
     return True
 
 
+def tip_keepout_triangles(polygon, cut=ACUTE_KEEP_OUT, threshold_deg=None):
+    """Triangles cut off sharp tips — no stalls may sit inside these."""
+    if threshold_deg is None:
+        threshold_deg = MIN_DRIVE_CORNER_DEG
+    tris = []
+    count = len(polygon)
+    for index in range(count):
+        if interior_angle_deg(polygon, index) >= threshold_deg - 0.5:
+            continue
+        curr = polygon[index]
+        prev = polygon[(index - 1) % count]
+        nxt = polygon[(index + 1) % count]
+        d_prev = math.hypot(curr[0] - prev[0], curr[1] - prev[1])
+        d_next = math.hypot(nxt[0] - curr[0], nxt[1] - curr[1])
+        if d_prev < 2.0 or d_next < 2.0:
+            continue
+        cut_len = min(cut, d_prev * 0.45, d_next * 0.45)
+        if cut_len < STALL_WIDTH:
+            continue
+        p1 = (
+            curr[0] + (prev[0] - curr[0]) * (cut_len / d_prev),
+            curr[1] + (prev[1] - curr[1]) * (cut_len / d_prev),
+        )
+        p2 = (
+            curr[0] + (nxt[0] - curr[0]) * (cut_len / d_next),
+            curr[1] + (nxt[1] - curr[1]) * (cut_len / d_next),
+        )
+        tris.append([curr, p1, p2])
+    return tris
+
+
 def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT):
-    for _index, _angle, (vx, vy) in acute_vertices(polygon):
+    """True when a point sits in a tip that cars cannot serve."""
+    for tri in tip_keepout_triangles(polygon, keep_out):
+        if point_inside(tri, x, y):
+            return True
+    for _index, _angle, (vx, vy) in acute_vertices(polygon, MIN_DRIVE_CORNER_DEG):
         if math.hypot(x - vx, y - vy) <= keep_out:
             return True
     return False
+
+
+def stall_in_acute_tip(stall, site_polygon, keep_out=ACUTE_KEEP_OUT):
+    """Reject a stall if its center or any corner sits in a sharp tip."""
+    samples = [
+        (
+            sum(p[0] for p in stall) / 4.0,
+            sum(p[1] for p in stall) / 4.0,
+        )
+    ]
+    samples.extend((p[0], p[1]) for p in stall)
+    return any(near_acute_corner(x, y, site_polygon, keep_out) for x, y in samples)
 
 
 def point_in_stall_xy(x, y, stall):
@@ -397,9 +445,7 @@ def filter_driveable_stalls(stalls, site_polygon):
         changed = False
         kept = []
         for stall in remaining:
-            cx = sum(p[0] for p in stall) / 4.0
-            cy = sum(p[1] for p in stall) / 4.0
-            if near_acute_corner(cx, cy, site_polygon):
+            if stall_in_acute_tip(stall, site_polygon):
                 changed = True
                 continue
             others = [other for other in remaining if other is not stall]
@@ -636,6 +682,80 @@ def access_points_on_street_edge(street_edge):
         (ax + (bx - ax) / 3.0, ay + (by - ay) / 3.0),
         (ax + 2.0 * (bx - ax) / 3.0, ay + 2.0 * (by - ay) / 3.0),
     ]
+
+
+def street_inward_normal(street_edge, site_polygon):
+    """Unit normal of the street edge pointing into the site."""
+    ax, ay = street_edge["a"]
+    bx, by = street_edge["b"]
+    length = math.hypot(bx - ax, by - ay) or 1.0
+    dx, dy = (bx - ax) / length, (by - ay) / length
+    nx, ny = -dy, dx
+    mx = 0.5 * (ax + bx)
+    my = 0.5 * (ay + by)
+    if not point_inside(site_polygon, mx + nx * 2.0, my + ny * 2.0):
+        nx, ny = -nx, -ny
+    return nx, ny
+
+
+def _segment_ray_hit(ox, oy, dx, dy, ax, ay, bx, by):
+    """Ray (ox,oy)+t(dx,dy), t>=0, vs segment ab. Returns t or None."""
+    ex, ey = bx - ax, by - ay
+    denom = dx * ey - dy * ex
+    if abs(denom) < 1e-12:
+        return None
+    sx, sy = ax - ox, ay - oy
+    t = (sx * ey - sy * ex) / denom
+    u = (sx * dy - sy * dx) / denom
+    if t < 0.05 or u < -1e-9 or u > 1.0 + 1e-9:
+        return None
+    return t
+
+
+def driveway_throat_target(access_point, street_edge, site_polygon, ring_outer, ring_inner=None):
+    """Project street access straight inward onto the ring centerline.
+
+    Avoids diagonal slashes caused by snapping to the nearest ring vertex.
+    """
+    if not street_edge or not ring_outer:
+        return None
+
+    ax, ay = access_point[0], access_point[1]
+    nx, ny = street_inward_normal(street_edge, site_polygon)
+    outer = as_xy_polygon(ring_outer)
+    best_t = None
+    count = len(outer)
+    for index in range(count):
+        p0 = outer[index]
+        p1 = outer[(index + 1) % count]
+        hit = _segment_ray_hit(ax, ay, nx, ny, p0[0], p0[1], p1[0], p1[1])
+        if hit is None:
+            continue
+        if best_t is None or hit < best_t:
+            best_t = hit
+
+    if best_t is None:
+        # Fallback: fixed depth from ring band metadata is handled by caller.
+        return None
+
+    # Land in the middle of the ring drive, not on the outer curb.
+    depth = RING_WIDTH * 0.5
+    if ring_inner:
+        inner = as_xy_polygon(ring_inner)
+        inner_t = None
+        for index in range(len(inner)):
+            p0 = inner[index]
+            p1 = inner[(index + 1) % len(inner)]
+            hit = _segment_ray_hit(ax, ay, nx, ny, p0[0], p0[1], p1[0], p1[1])
+            if hit is None:
+                continue
+            if inner_t is None or hit < inner_t:
+                inner_t = hit
+        if inner_t is not None and inner_t > best_t:
+            depth = 0.5 * (inner_t - best_t)
+
+    t = best_t + depth
+    return (ax + nx * t, ay + ny * t)
 
 
 def candidate_orientations(polygon, access_points=None, street_edge=None):
@@ -1512,13 +1632,28 @@ def compose_candidate(
     if interior:
         islands.extend(interior.get("islands") or [])
 
+    pack_angle = basis["angle"]
+    street_align = 0
+    if street_edge:
+        sax, say = street_edge["a"]
+        sbx, sby = street_edge["b"]
+        street_angle = math.degrees(math.atan2(sby - say, sbx - sax)) % 180.0
+        delta = abs((pack_angle % 180.0) - street_angle) % 180.0
+        delta = min(delta, 180.0 - delta)
+        # 0 or 90 deg to the street is ideal; score the nearest ortho match.
+        ortho = min(delta % 90.0, 90.0 - (delta % 90.0))
+        if ortho < 1.0:
+            street_align = 3
+        elif ortho < 5.0:
+            street_align = 1
+
     return {
         "stalls": driveable,
         "aisles": interior["aisles"] if interior else [],
         "islands": islands,
         "stall_count": len(driveable),
         "run_count": interior["run_count"] if interior else 0,
-        "angle": basis["angle"],
+        "angle": pack_angle,
         "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
         "u_phase": interior.get("u_phase", 0.0) if interior else 0.0,
@@ -1531,18 +1666,21 @@ def compose_candidate(
         "ring_inner_poly": ring_meta.get("ring_inner_poly"),
         "ortho_bonus": 1 if ring_meta["ring_mode"] == "ortho" else 0,
         "long_aisle_bonus": 1 if ring_meta.get("long_aisle") else 0,
+        "street_align": street_align,
         "access_points": access_pts,
         "access_clear": DRIVEWAY_CLEAR,
     }
 
 
-def candidate_score(candidate):
-    """Stall count / site fill first. Do not reward tiny ortho cut-downs."""
+def candidate_rank(candidate):
+    """Higher tuple wins. Stall count dominates; alignment breaks ties."""
     if candidate is None:
-        return -1
+        return None
     return (
-        candidate["stall_count"]
-        + (2 if candidate.get("long_aisle_bonus") else 0)
+        candidate["stall_count"],
+        1 if candidate.get("long_aisle_bonus") else 0,
+        candidate.get("street_align", 0),
+        1 if candidate.get("ring_mode") == "offset" else 0,
     )
 
 
@@ -1551,7 +1689,7 @@ def better_candidate(current, challenger):
         return current
     if current is None:
         return challenger
-    if candidate_score(challenger) > candidate_score(current):
+    if candidate_rank(challenger) > candidate_rank(current):
         return challenger
     return current
 
@@ -1981,82 +2119,12 @@ def stall_back_curbs(stalls, site_polygon, z):
 
 
 def interior_landscape_island_curbs(site_polygon, z, layout, cell=9.0):
-    """Outline non-drive / non-stall pockets inside the ring as curb islands."""
-    _outer, inner = layout_ring_polylines(layout, site_polygon, z)
-    if not inner:
-        return []
+    """Disabled: axis-aligned leftover AABBs falsely covered real stalls.
 
-    inner_2d = as_xy_polygon(inner)
-    if len(inner_2d) < 3:
-        return []
-
-    drive_polys = [as_xy_polygon(aisle) for aisle in layout.get("aisles", [])]
-    stall_polys = [as_xy_polygon(stall) for stall in layout.get("stalls", [])]
-    # Explicit terminal / interior islands already have curbs; skip leftovers there.
-    island_polys = [as_xy_polygon(island) for island in layout.get("islands", [])]
-
-    min_x = min(p[0] for p in inner_2d)
-    max_x = max(p[0] for p in inner_2d)
-    min_y = min(p[1] for p in inner_2d)
-    max_y = max(p[1] for p in inner_2d)
-    if max_x - min_x < cell * 2 or max_y - min_y < cell * 2:
-        return []
-
-    cols = int(math.ceil((max_x - min_x) / cell))
-    rows = int(math.ceil((max_y - min_y) / cell))
-    empty = [[False] * cols for _ in range(rows)]
-
-    for row in range(rows):
-        for col in range(cols):
-            x = min_x + (col + 0.5) * cell
-            y = min_y + (row + 0.5) * cell
-            if not point_inside(inner_2d, x, y):
-                continue
-            if not point_inside(site_polygon, x, y):
-                continue
-            if (
-                _point_in_any(x, y, drive_polys)
-                or _point_in_any(x, y, stall_polys)
-                or _point_in_any(x, y, island_polys)
-            ):
-                continue
-            empty[row][col] = True
-
-    seen = [[False] * cols for _ in range(rows)]
-    islands = []
-
-    for row in range(rows):
-        for col in range(cols):
-            if not empty[row][col] or seen[row][col]:
-                continue
-            stack = [(row, col)]
-            seen[row][col] = True
-            cells = []
-            while stack:
-                cr, cc = stack.pop()
-                cells.append((cr, cc))
-                for dr, dc in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                    nr, nc = cr + dr, cc + dc
-                    if nr < 0 or nc < 0 or nr >= rows or nc >= cols:
-                        continue
-                    if seen[nr][nc] or not empty[nr][nc]:
-                        continue
-                    seen[nr][nc] = True
-                    stack.append((nr, nc))
-
-            # Ignore tiny leftover slivers; keep real landscape islands.
-            if len(cells) < 4:
-                continue
-            xs = [min_x + (c + 0.5) * cell for _, c in cells]
-            ys = [min_y + (r + 0.5) * cell for r, _ in cells]
-            pad = cell * 0.5
-            u0, u1 = min(xs) - pad, max(xs) + pad
-            v0, v1 = min(ys) - pad, max(ys) + pad
-            if u1 - u0 < STALL_WIDTH or v1 - v0 < STALL_WIDTH:
-                continue
-            islands.append(_closed_xyz([(u0, v0), (u1, v0), (u1, v1), (u0, v1)], z))
-
-    return [island for island in islands if island]
+    Terminal / interior end-cap islands are emitted explicitly during packing.
+    Stall-back curbs already outline the parked field.
+    """
+    return []
 
 
 def acute_corner_pocket_curbs(site_polygon, z, keep_out=ACUTE_KEEP_OUT):
@@ -2099,7 +2167,6 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
     - ring faces (drive aisle curb lines)
     - chained stall-back curbs
     - terminal / interior end-of-row landscape islands
-    - interior non-drive landscape islands inside the ring
     - acute-corner keep-out pockets
     """
     curbs = []
@@ -2123,7 +2190,6 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
         closed = _closed_xyz(as_xy_polygon(island), z)
         if closed:
             curbs.append(closed)
-    curbs.extend(interior_landscape_island_curbs(site_polygon, z, layout))
     curbs.extend(acute_corner_pocket_curbs(site_polygon, z))
 
     # Drop degenerate runs.

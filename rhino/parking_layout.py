@@ -149,59 +149,49 @@ def draw_street_edge(street_edge, z):
 
 
 def draw_access(polygon, z, layout, access_points, street_edge=None):
-    """Draw entry/exit driveway throats from the street into the ring."""
+    """Draw entry/exit driveway throats straight inward from the street."""
     created = []
-    outer, inner = core.layout_ring_polylines(layout, polygon, z)
-    ring_center = None
-    if outer and inner and len(outer) == len(inner):
-        ring_center = [
-            ((outer[i][0] + inner[i][0]) * 0.5, (outer[i][1] + inner[i][1]) * 0.5)
-            for i in range(len(outer))
-        ]
-    elif layout.get("ring_mode") != "ortho":
-        ring_center = core.offset_polygon(polygon, (layout["ring_outer"] + layout["ring_inner"]) * 0.5)
+    if not access_points or not street_edge:
+        return created
 
-    if not ring_center or not access_points:
+    outer, inner = core.layout_ring_polylines(layout, polygon, z)
+    if not outer:
         return created
 
     clear = layout.get("access_clear", core.DRIVEWAY_CLEAR)
-    # Street-direction unit vector for driveway width.
-    sx = sy = 0.0
-    if street_edge:
-        sax, say = street_edge["a"]
-        sbx, sby = street_edge["b"]
-        sl = math.hypot(sbx - sax, sby - say) or 1.0
-        sx, sy = (sbx - sax) / sl, (sby - say) / sl
+    sax, say = street_edge["a"]
+    sbx, sby = street_edge["b"]
+    sl = math.hypot(sbx - sax, sby - say) or 1.0
+    sx, sy = (sbx - sax) / sl, (sby - say) / sl
+    nx, ny = core.street_inward_normal(street_edge, polygon)
 
     for point in access_points:
         access = core.as_tuple(point)
-        nearest = None
-        for x, y in ring_center:
-            distance = (x - access[0]) ** 2 + (y - access[1]) ** 2
-            if nearest is None or distance < nearest[0]:
-                nearest = (distance, (x, y))
-        if not nearest:
-            continue
+        target = core.driveway_throat_target(access, street_edge, polygon, outer, inner)
+        if not target:
+            # Fallback: fixed depth along the street inward normal.
+            depth = 0.5 * (layout.get("ring_outer", 0.0) + layout.get("ring_inner", core.RING_WIDTH))
+            if depth < 1.0:
+                depth = core.RING_WIDTH
+            target = (access[0] + nx * depth, access[1] + ny * depth)
 
-        tx, ty = nearest[1]
-        # Centerline into the ring.
+        tx, ty = target
         center = rs.AddLine((access[0], access[1], z), (tx, ty, z))
         if center:
             rs.ObjectLayer(center, LAYERS["circulation"])
             created.append(center)
 
-        # Two edge lines showing the clear driveway width (no parking in between).
-        if street_edge:
-            half = clear * 0.5
-            for sign in (-1.0, 1.0):
-                ox, oy = sx * half * sign, sy * half * sign
-                edge = rs.AddLine(
-                    (access[0] + ox, access[1] + oy, z),
-                    (tx + ox, ty + oy, z),
-                )
-                if edge:
-                    rs.ObjectLayer(edge, LAYERS["circulation"])
-                    created.append(edge)
+        # Driveway width edges stay parallel to the street (true curb-cut throat).
+        half = clear * 0.5
+        for sign in (-1.0, 1.0):
+            ox, oy = sx * half * sign, sy * half * sign
+            edge = rs.AddLine(
+                (access[0] + ox, access[1] + oy, z),
+                (tx + ox, ty + oy, z),
+            )
+            if edge:
+                rs.ObjectLayer(edge, LAYERS["circulation"])
+                created.append(edge)
 
     return created
 
