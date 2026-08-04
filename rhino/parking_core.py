@@ -1854,11 +1854,10 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
                 shape = stall_shape(u, front_v, geometry, lean_sign)
                 if role == "stall":
                     stalls.append(island_from_local_shape(basis, shape, z))
-                else:
+                elif role == "interior":
                     # Rows share an absolute column grid.  Hold landscape
-                    # cells until both sides are known so matching terminal
-                    # or divider cells become one continuous 36 ft island,
-                    # rather than two touching 18 ft capsules with a seam.
+                    # cells until both sides are known so matching divider
+                    # cells become one continuous 36 ft island.
                     key = round(u, 6)
                     island_cells.setdefault(key, []).append(
                         (row["sign"], u, shape)
@@ -1883,6 +1882,36 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
                 islands.append(island_from_local_shape(basis, shape, z))
             else:
                 islands.append(island_from_local_shape(basis, cells[0][2], z))
+
+        rows_by_sign = dict((row["sign"], row) for row in run["rows"])
+        lower = rows_by_sign.get(-1.0)
+        upper = rows_by_sign.get(1.0)
+        if lower is not None and upper is not None:
+            # One stepped cap joins both row ends.  When a tapered parcel
+            # makes one row longer, the centre-line connector fills the step
+            # and produces the single wedge-shaped terminal island shown in
+            # the manual plan.
+            terminal_width = TERMINAL_ISLAND_COLUMNS * pitch
+            for at_start in (True, False):
+                if at_start:
+                    lu0, lu1 = lower["u0"], lower["u0"] + terminal_width
+                    uu0, uu1 = upper["u0"], upper["u0"] + terminal_width
+                else:
+                    lu0, lu1 = lower["u1"] - terminal_width, lower["u1"]
+                    uu0, uu1 = upper["u1"] - terminal_width, upper["u1"]
+                shape = [
+                    (lu0, center_v - depth),
+                    (lu1, center_v - depth),
+                    (lu1, center_v),
+                    (uu1, center_v),
+                    (uu1, center_v + depth),
+                    (uu0, center_v + depth),
+                    (uu0, center_v),
+                    (lu0, center_v),
+                ]
+                islands.append(island_from_local_shape(
+                    basis, _dedupe_uv(shape), z,
+                ))
 
         envelopes.append(island_from_local_shape(
             basis, bay_envelope_uv(run, geometry), z,
