@@ -14,20 +14,23 @@ Surface lots are planned the way practitioners iterate a sketch:
 4. Fill everything inside the ring with a 90 degree double-loaded module
    grid, searching lattice phase (tile-and-trim). Island aisles prefer the
    long axis of the core so each bay run is as long as possible.
-5. Reject any stall in an acute corner, and reject any stall that does not
-   have a clear 24 ft maneuvering aisle in front (SUDAS / ULI 90 degree rule).
+5. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS / ULI
+   90 degree rule). Reject stalls in sharp tips, and reject any stall that cannot
+   reach the chamfered ring — the tip between the site corner and the ring curb
+   stays empty (manual dead zone).
 6. Circulation may follow the site. Obtuse aisle corners are fine; only
    acute drive corners (< 90 deg) are forbidden. Sharp tips on an offset
    ring are chamfered so the drive stays driveable without cutting the
    whole site down to a tiny rectangle.
 7. Leave clear entry/exit openings on the street frontage — no stalls in
-   the driveway throats.
+   the driveway throats. Driveway throats project straight inward from the
+   street.
 8. Reserve terminal (end-cap) landscape islands at both ends of every
    parking row so the turn into the cross aisle stays clear. Long runs
    also get interior islands so no more than ten stalls sit in a row
    without a break.
-9. Keep the candidate with the most driveable stalls. Long-axis island
-   aisles get a small tie-break bonus.
+9. Keep the candidate with the most driveable stalls. Street-aligned grids
+   and long-axis island aisles break ties.
 
 Module widths come from Iowa SUDAS 8B-1 Table 8B-1.02 (ULI/NPA). They set
 the lattice period; trial-and-error over orientation and ring geometry
@@ -282,9 +285,13 @@ def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG, max_pass
             if d_prev < 2.0 or d_next < 2.0:
                 continue
 
-            # Cut far enough to blunt the tip, but never more than ~40% of an edge.
-            cut = min(d_prev, d_next, max(RING_WIDTH * 0.75, min(d_prev, d_next) * 0.3))
-            cut = min(cut, d_prev * 0.4, d_next * 0.4)
+            # Cut far enough to blunt the tip, but never more than half an edge.
+            # Deeper than a token chamfer so the empty tip matches manual layouts.
+            angle = interior_angle_deg(poly, index)
+            target = max(RING_WIDTH, STALL_STRIPE * 0.75)
+            if angle < 60.0:
+                target = max(target, RING_WIDTH * 1.25)
+            cut = min(d_prev, d_next, target, min(d_prev, d_next) * 0.5)
             if cut < 1.0:
                 new_poly.append(curr)
                 continue
@@ -318,14 +325,34 @@ def ring_drive_is_acceptable(ring_outer_poly, ring_inner_poly=None):
     return True
 
 
-def tip_keepout_triangles(polygon, cut=ACUTE_KEEP_OUT, threshold_deg=None):
-    """Triangles cut off sharp tips — no stalls may sit inside these."""
+def tip_clearance_depth(angle_deg):
+    """Distance from a tip before stall + ring can fit in the wedge.
+
+    Matches the manual dead zone: leave the whole unreachable tip empty,
+    not just a small circle around the vertex.
+    """
+    clamped = max(min(angle_deg, 89.0), 5.0)
+    half = math.radians(clamped * 0.5)
+    # Stall row + ring + stall row: narrower tips need a deeper empty pocket.
+    needed = 2.0 * STALL_STRIPE + RING_WIDTH
+    depth = needed / (2.0 * math.tan(half))
+    return max(ACUTE_KEEP_OUT, min(depth, 180.0))
+
+
+def tip_keepout_triangles(polygon, cut=None, threshold_deg=None, ring_outer_poly=None):
+    """Triangles cut off sharp tips — no stalls may sit inside these.
+
+    When a chamfered ring is available, deepen each triangle to the ring curb
+    so the whole tip dead zone stays empty (manual layout behavior).
+    """
     if threshold_deg is None:
         threshold_deg = MIN_DRIVE_CORNER_DEG
+    outer = as_xy_polygon(ring_outer_poly) if ring_outer_poly else None
     tris = []
     count = len(polygon)
     for index in range(count):
-        if interior_angle_deg(polygon, index) >= threshold_deg - 0.5:
+        angle = interior_angle_deg(polygon, index)
+        if angle >= threshold_deg - 0.5:
             continue
         curr = polygon[index]
         prev = polygon[(index - 1) % count]
@@ -334,7 +361,12 @@ def tip_keepout_triangles(polygon, cut=ACUTE_KEEP_OUT, threshold_deg=None):
         d_next = math.hypot(nxt[0] - curr[0], nxt[1] - curr[1])
         if d_prev < 2.0 or d_next < 2.0:
             continue
-        cut_len = min(cut, d_prev * 0.45, d_next * 0.45)
+        # Cut deep enough that the remaining wedge can hold a stall + ring.
+        depth = tip_clearance_depth(angle) if cut is None else cut
+        if outer and len(outer) >= 3:
+            # Clear from the tip all the way to the chamfered ring face.
+            depth = max(depth, distance_to_polygon(outer, curr[0], curr[1]) - 1.0)
+        cut_len = min(depth, d_prev * 0.9, d_next * 0.9)
         if cut_len < STALL_WIDTH:
             continue
         p1 = (
@@ -349,18 +381,23 @@ def tip_keepout_triangles(polygon, cut=ACUTE_KEEP_OUT, threshold_deg=None):
     return tris
 
 
-def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT):
+def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT, ring_outer_poly=None):
     """True when a point sits in a tip that cars cannot serve."""
-    for tri in tip_keepout_triangles(polygon, keep_out):
+    for tri in tip_keepout_triangles(polygon, ring_outer_poly=ring_outer_poly):
         if point_inside(tri, x, y):
             return True
-    for _index, _angle, (vx, vy) in acute_vertices(polygon, MIN_DRIVE_CORNER_DEG):
-        if math.hypot(x - vx, y - vy) <= keep_out:
+    for _index, angle, (vx, vy) in acute_vertices(polygon, MIN_DRIVE_CORNER_DEG):
+        radius = max(keep_out, tip_clearance_depth(angle) * 0.5)
+        if ring_outer_poly:
+            outer = as_xy_polygon(ring_outer_poly)
+            if len(outer) >= 3:
+                radius = max(radius, distance_to_polygon(outer, vx, vy) - 1.0)
+        if math.hypot(x - vx, y - vy) <= radius:
             return True
     return False
 
 
-def stall_in_acute_tip(stall, site_polygon, keep_out=ACUTE_KEEP_OUT):
+def stall_in_acute_tip(stall, site_polygon, keep_out=ACUTE_KEEP_OUT, ring_outer_poly=None):
     """Reject a stall if its center or any corner sits in a sharp tip."""
     samples = [
         (
@@ -369,7 +406,71 @@ def stall_in_acute_tip(stall, site_polygon, keep_out=ACUTE_KEEP_OUT):
         )
     ]
     samples.extend((p[0], p[1]) for p in stall)
-    return any(near_acute_corner(x, y, site_polygon, keep_out) for x, y in samples)
+    return any(
+        near_acute_corner(x, y, site_polygon, keep_out, ring_outer_poly)
+        for x, y in samples
+    )
+
+
+def stall_reachable_from_ring(stall, ring_outer_poly, ring_inner_poly=None, reach=None):
+    """True when this stall can enter the chamfered ring drive.
+
+    Perimeter stalls in a chamfered tip often have 24 ft of empty space in
+    front, but that space is a dead zone — the ring was cut away. Those
+    stalls must be removed, matching the manual empty tip.
+    """
+    if reach is None:
+        reach = STALL_STRIPE + 4.0
+    if not ring_outer_poly:
+        return True
+
+    outer = as_xy_polygon(ring_outer_poly)
+    if len(outer) < 3:
+        return True
+
+    cx = sum(p[0] for p in stall) / 4.0
+    cy = sum(p[1] for p in stall) / 4.0
+
+    if ring_inner_poly:
+        inner = as_xy_polygon(ring_inner_poly)
+        if len(inner) >= 3 and point_inside(inner, cx, cy):
+            return True
+
+    # Inside the outer ring (drive band or core) is always served.
+    if point_inside(outer, cx, cy):
+        return True
+
+    # Outside the ring: only the perimeter stall band hugging the curb is OK.
+    # Tip leftovers sit far from the chamfer cut and fail this test.
+    if distance_to_polygon(outer, cx, cy) > reach:
+        return False
+
+    for px, py in ((p[0], p[1]) for p in stall):
+        if point_inside(outer, px, py):
+            continue
+        if distance_to_polygon(outer, px, py) > reach + STALL_WIDTH:
+            return False
+    return True
+
+
+def filter_ring_served_stalls(stalls, ring_outer_poly, ring_inner_poly=None):
+    if not ring_outer_poly:
+        return list(stalls)
+    return [
+        stall for stall in stalls
+        if stall_reachable_from_ring(stall, ring_outer_poly, ring_inner_poly)
+    ]
+
+
+def filter_ring_served_islands(islands, ring_outer_poly, ring_inner_poly=None):
+    """Drop end-cap islands that landed in the unreachable tip dead zone."""
+    if not ring_outer_poly or not islands:
+        return list(islands or [])
+    kept = []
+    for island in islands:
+        if stall_reachable_from_ring(island, ring_outer_poly, ring_inner_poly):
+            kept.append(island)
+    return kept
 
 
 def point_in_stall_xy(x, y, stall):
@@ -435,7 +536,7 @@ def stall_has_maneuvering_aisle(stall, site_polygon, occupied_stalls=None, aisle
     return best_ok
 
 
-def filter_driveable_stalls(stalls, site_polygon):
+def filter_driveable_stalls(stalls, site_polygon, ring_outer_poly=None, ring_inner_poly=None):
     """Drop stalls in acute tips or without a 24 ft clear aisle in front."""
     remaining = list(stalls)
     changed = True
@@ -445,7 +546,10 @@ def filter_driveable_stalls(stalls, site_polygon):
         changed = False
         kept = []
         for stall in remaining:
-            if stall_in_acute_tip(stall, site_polygon):
+            if stall_in_acute_tip(stall, site_polygon, ring_outer_poly=ring_outer_poly):
+                changed = True
+                continue
+            if not stall_reachable_from_ring(stall, ring_outer_poly, ring_inner_poly):
                 changed = True
                 continue
             others = [other for other in remaining if other is not stall]
@@ -1620,7 +1724,11 @@ def compose_candidate(
 
     interior_stalls = interior["stalls"] if interior else []
     combined = list(ring_stalls) + list(interior_stalls)
-    driveable = filter_driveable_stalls(combined, site_polygon)
+    ring_outer = ring_meta.get("ring_outer_poly")
+    ring_inner = ring_meta.get("ring_inner_poly")
+    driveable = filter_driveable_stalls(
+        combined, site_polygon, ring_outer_poly=ring_outer, ring_inner_poly=ring_inner,
+    )
     driveable = filter_street_access_stalls(driveable, street_edge)
     if not driveable:
         return None
@@ -1631,6 +1739,12 @@ def compose_candidate(
     islands = list(ring_islands or [])
     if interior:
         islands.extend(interior.get("islands") or [])
+    islands = filter_ring_served_islands(islands, ring_outer, ring_inner)
+    # Also drop islands that sit inside the tip dead zone.
+    islands = [
+        island for island in islands
+        if not stall_in_acute_tip(island, site_polygon, ring_outer_poly=ring_outer)
+    ]
 
     pack_angle = basis["angle"]
     street_align = 0
