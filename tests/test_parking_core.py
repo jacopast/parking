@@ -125,7 +125,31 @@ class BayIslandReferenceTests(unittest.TestCase):
         short_loop = [(0, 0), (40, 0), (40, 40), (0, 40)]
         self.assertFalse(core.ring_drive_is_acceptable(short_loop))
 
-    def test_land_use_splits_non_drivable_and_standing(self):
+    def test_awkward_leftover_becomes_non_drivable(self):
+        """When another row will not fit, leftover core band is non-drivable."""
+        street = core.street_edge_from_index(REFERENCE_SITE, 0)
+        layout = core.best_layout(
+            REFERENCE_SITE, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        horizontal = min(
+            core.option_layouts(layout),
+            key=lambda option: abs(core.angle_key(option["angle"])),
+        )
+        # Capacity stays primary; leftover is absorbed as landscape, not stalls.
+        self.assertEqual(horizontal["stall_count"], 162)
+        self.assertGreater(horizontal.get("awkward_pad", 0.0), 0.0)
+        self.assertGreaterEqual(len(horizontal.get("absorb_landscape") or []), 1)
+        land = core.layout_land_use(REFERENCE_SITE, horizontal, 5.0, street, 0.0)
+        absorb = horizontal["absorb_landscape"][0]
+        cx = sum(p[0] for p in absorb) / 4.0
+        cy = sum(p[1] for p in absorb) / 4.0
+        self.assertTrue(
+            any(core.point_inside(core.as_xy_polygon(region), cx, cy)
+                for region in land["non_drivable"]),
+            msg="absorb leftover must appear in non_drivable land use",
+        )
         street = core.street_edge_from_index(REFERENCE_SITE, 0)
         layout = core.best_layout(
             REFERENCE_SITE,

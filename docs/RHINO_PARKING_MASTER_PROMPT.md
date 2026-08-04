@@ -198,6 +198,10 @@ STEP F — Per-column, per-ROW fitting (this is what makes tapers work)
     leaves tapered parcels half empty.
   - After the double-loaded lattice, fill leftover v-strips ≥ 42 ft with
     single-loaded modules (18 + 24).
+  - If a leftover strip cannot take another clean row, GROW the outer
+    setback / ring offset (or paint the void as non-drivable landscape /
+    pavement). Stall count still wins when a valid row fits; when it does
+    not, shrink the parking field rather than leave empty driveable waste.
   - After packing, flood-fill driveable cells from street access and drop
     stalls whose aisle is not reachable (disconnected concave lobes).
   - Two rows of the same island therefore have DIFFERENT lengths on a

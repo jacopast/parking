@@ -2190,6 +2190,11 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
 
     if not runs:
         return None
+
+    awkward_pad, absorb_bands = _awkward_leftover_bands(
+        core_min_u, core_max_u, core_min_v, core_max_v,
+        occupied_v, single,
+    )
     return {
         "runs": runs,
         "module_core": None,
@@ -2197,7 +2202,63 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
         "aisle_length": sum(run["u1"] - run["u0"] for run in runs),
         "stall_count": sum(run["stall_count"] for run in runs),
         "v_phase": v_phase,
+        "awkward_pad": awkward_pad,
+        "absorb_bands_uv": absorb_bands,
     }
+
+
+# Leftover edge bands smaller than a single-loaded module, or large enough but
+# blocked from receiving one, become outer landscape instead of empty pavement.
+MIN_AWKWARD_LEFTOVER = 3.0
+MAX_OUTER_ABSORB_PAD = STALL_STRIPE * 2.0  # 36 ft cap on extra outer offset
+
+
+def _awkward_leftover_bands(core_min_u, core_max_u, core_min_v, core_max_v,
+                            occupied_v, single_module):
+    """Measure edge voids that cannot host another stall row.
+
+    Returns (pad_ft, bands_uv). ``pad_ft`` is a suggested uniform growth of the
+    outer ring / setback offset that would swallow the waste. ``bands_uv`` are
+    rectangles to paint as non-drivable if the void remains inside the core.
+    """
+    if not occupied_v:
+        return 0.0, []
+
+    # Clip module envelopes to the core — outer aisles often spill into the ring.
+    interior = []
+    for lo, hi in occupied_v:
+        clo = max(lo, core_min_v)
+        chi = min(hi, core_max_v)
+        if chi > clo + 0.01:
+            interior.append((clo, chi))
+    if not interior:
+        return 0.0, []
+
+    used_lo = min(lo for lo, _hi in interior)
+    used_hi = max(hi for _lo, hi in interior)
+    bottom = used_lo - core_min_v
+    top = core_max_v - used_hi
+
+    bands = []
+    pad_parts = []
+    if bottom >= MIN_AWKWARD_LEFTOVER:
+        # Single-loaded placement was already attempted; remaining edge void
+        # cannot become stalls, so it becomes outer landscape instead.
+        bands.append((core_min_u, core_max_u, core_min_v, core_min_v + bottom))
+        pad_parts.append(bottom)
+    if top >= MIN_AWKWARD_LEFTOVER:
+        bands.append((core_min_u, core_max_u, core_max_v - top, core_max_v))
+        pad_parts.append(top)
+
+    if not pad_parts:
+        return 0.0, []
+
+    # Uniform outer-offset growth that removes the waste from both ends when
+    # possible; cap so irregular sites are not hollowed out.
+    pad = min(MAX_OUTER_ABSORB_PAD, sum(pad_parts) * 0.5)
+    if pad < MIN_AWKWARD_LEFTOVER:
+        pad = min(MAX_OUTER_ABSORB_PAD, max(pad_parts))
+    return pad, bands
 
 
 def _dedupe_uv(points, tol=0.05):
@@ -2344,11 +2405,19 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
             basis, bay_envelope_uv(run, geometry), z,
         ))
 
+    absorb = []
+    for u0, u1, v0, v1 in skeleton.get("absorb_bands_uv") or []:
+        if u1 - u0 < 1.0 or v1 - v0 < MIN_AWKWARD_LEFTOVER:
+            continue
+        absorb.append(rect_world_polygon(basis, u0, u1, v0, v1, z))
+
     return {
         "stalls": stalls,
         "aisles": aisles,
         "bay_envelopes": envelopes,
         "islands": islands,
+        "absorb_landscape": absorb,
+        "awkward_pad": skeleton.get("awkward_pad", 0.0),
         "stall_count": len(stalls),
         "run_count": len(skeleton["runs"]),
         "connected_run_count": skeleton["connected_run_count"],
@@ -2400,6 +2469,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
                 continue
             rank = (
                 skeleton["stall_count"],
+                -skeleton.get("awkward_pad", 0.0),
                 skeleton["connected_run_count"],
                 skeleton["aisle_length"],
             )
@@ -2811,6 +2881,8 @@ def compose_candidate(
         "aisles": interior["aisles"] if interior else [],
         "bay_envelopes": interior.get("bay_envelopes", []) if interior else [],
         "islands": islands,
+        "absorb_landscape": list(interior.get("absorb_landscape") or []) if interior else [],
+        "awkward_pad": (interior.get("awkward_pad", 0.0) if interior else 0.0),
         "module_core": interior.get("module_core") if interior else None,
         "skeleton_runs": interior.get("skeleton_runs", []) if interior else [],
         "stall_count": len(driveable),
@@ -2882,6 +2954,9 @@ def candidate_rank(candidate):
         return None
     return (
         candidate["stall_count"],
+        # Prefer seating more modules; when counts tie, prefer less leftover
+        # pavement (more outer landscape absorb).
+        -candidate.get("awkward_pad", 0.0),
         candidate.get("connected_run_count", 0),
         candidate.get("aisle_length", 0.0),
         1 if candidate.get("long_aisle_bonus") else 0,
@@ -3024,77 +3099,100 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
         else (1,)
     )
 
+    def develop(edge_outer, ring_outer, chamfer_side, perimeter_stalls, perimeter_islands):
+        outer_poly, inner_poly = ring_band_points(
+            polygon, z, ring_outer, ring_outer + RING_WIDTH,
+            edge_outer=edge_outer,
+            chamfer_side=chamfer_side,
+        )
+        pack_basis = basis
+        entrance_points = (
+            access_points_on_street_edge(street_edge) if street_edge else None
+        )
+        long_aisle = span_u >= span_v
+
+        if outer_poly and inner_poly:
+            core_poly = as_xy_polygon(inner_poly)
+            drive_poly = as_xy_polygon(outer_poly)
+            interior = layout_for_angle(
+                core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
+                entrance_points=entrance_points,
+            )
+            ring_meta = {
+                "ring_mode": "offset",
+                "ring_outer": ring_outer,
+                "ring_inner": ring_outer + RING_WIDTH,
+                "ring_outer_poly": outer_poly,
+                "ring_inner_poly": inner_poly,
+                "long_aisle": long_aisle,
+                "chamfer_side": chamfer_side,
+            }
+            return compose_candidate(
+                perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+                street_edge, ring_islands=perimeter_islands,
+            ), interior
+
+        if not perimeter_stalls:
+            return None, None
+        raw_outer = offset_polygon_edges(polygon, edge_outer)
+        if not raw_outer or not offset_result_is_valid(
+            polygon, raw_outer, max(edge_outer),
+        ):
+            raw_outer = offset_polygon(polygon, ring_outer)
+        if not raw_outer:
+            return None, None
+        outer_points = [(x, y, z) for x, y in as_xy_polygon(raw_outer)]
+        ring_meta = {
+            "ring_mode": "offset",
+            "ring_outer": ring_outer,
+            "ring_inner": ring_outer,
+            "ring_outer_poly": outer_points,
+            "ring_inner_poly": None,
+            "long_aisle": long_aisle,
+            "chamfer_side": chamfer_side,
+        }
+        return compose_candidate(
+            perimeter_stalls, None, pack_basis, geometry, ring_meta, polygon,
+            street_edge, ring_islands=perimeter_islands,
+        ), None
+
     for variant in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
         perimeter_stalls = variant["stalls"]
         perimeter_islands = variant["islands"]
         ring_outer = variant["ring_outer"]
-        # An acute tip has two valid asymmetric chamfers. One makes the
-        # previous side square, the other makes the next side square. Develop
-        # both complete layouts and keep the one with more final stalls.
         for chamfer_side in chamfer_sides:
-            outer_poly, inner_poly = ring_band_points(
-                polygon, z, ring_outer, ring_outer + RING_WIDTH,
-                edge_outer=variant["edge_outer"],
-                chamfer_side=chamfer_side,
-            )
-            pack_basis = basis
-            entrance_points = (
-                access_points_on_street_edge(street_edge) if street_edge else None
-            )
-            long_aisle = span_u >= span_v
-
-            if outer_poly and inner_poly:
-                core_poly = as_xy_polygon(inner_poly)
-                drive_poly = as_xy_polygon(outer_poly)
-                interior = layout_for_angle(
-                    core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
-                    entrance_points=entrance_points,
-                )
-                ring_meta = {
-                    "ring_mode": "offset",
-                    "ring_outer": ring_outer,
-                    "ring_inner": ring_outer + RING_WIDTH,
-                    "ring_outer_poly": outer_poly,
-                    "ring_inner_poly": inner_poly,
-                    "long_aisle": long_aisle,
-                    "chamfer_side": chamfer_side,
-                }
-                candidate = compose_candidate(
-                    perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
-                    street_edge, ring_islands=perimeter_islands,
-                )
-                best = better_candidate(best, candidate)
-                continue
-
-            # Narrow necks / U-arms cannot host a 24 ft core. Keep a
-            # perimeter-only layout when the outer usable curb is still valid,
-            # instead of inventing a flipped courtyard core.
-            if not perimeter_stalls:
-                continue
-            raw_outer = offset_polygon_edges(polygon, variant["edge_outer"])
-            if not raw_outer or not offset_result_is_valid(
-                polygon, raw_outer, max(variant["edge_outer"]),
-            ):
-                raw_outer = offset_polygon(polygon, ring_outer)
-            if not raw_outer:
-                continue
-            outer_points = [(x, y, z) for x, y in as_xy_polygon(raw_outer)]
-            ring_meta = {
-                "ring_mode": "offset",
-                "ring_outer": ring_outer,
-                "ring_inner": ring_outer,
-                "ring_outer_poly": outer_points,
-                "ring_inner_poly": None,
-                "long_aisle": long_aisle,
-                "chamfer_side": chamfer_side,
-            }
-            candidate = compose_candidate(
-                perimeter_stalls, None, pack_basis, geometry, ring_meta, polygon,
-                street_edge, ring_islands=perimeter_islands,
+            candidate, interior = develop(
+                variant["edge_outer"], ring_outer, chamfer_side,
+                perimeter_stalls, perimeter_islands,
             )
             best = better_candidate(best, candidate)
+
+            # If another stall row will not fit cleanly, grow the outer offset
+            # so the leftover band becomes setback landscape / pavement instead
+            # of empty driveable core. Keep the padded layout only when it does
+            # not reduce stall count (capacity still wins).
+            pad = 0.0
+            if interior:
+                pad = float(interior.get("awkward_pad") or 0.0)
+            if candidate and pad >= MIN_AWKWARD_LEFTOVER:
+                pad = min(pad, MAX_OUTER_ABSORB_PAD)
+                padded_edges = [distance + pad for distance in variant["edge_outer"]]
+                padded_candidate, padded_interior = develop(
+                    padded_edges, ring_outer + pad, chamfer_side,
+                    perimeter_stalls, perimeter_islands,
+                )
+                if padded_candidate is not None:
+                    if padded_candidate["stall_count"] >= candidate["stall_count"]:
+                        # Same or better capacity with a tighter parking field.
+                        padded_candidate["awkward_pad"] = float(
+                            (padded_interior or {}).get("awkward_pad") or 0.0
+                        )
+                        padded_candidate["outer_absorb_pad"] = pad
+                        best = better_candidate(best, padded_candidate)
+                    # else: keep the original; its absorb_landscape still paints
+                    # the awkward void as non-drivable greens.
     return best
 
 
@@ -3980,8 +4078,18 @@ def layout_land_use(site_polygon, layout, setback=0.0, street_edge=None, z=0.0):
     non_drivable.extend(setback_landscape_polygons(
         site_polygon, setback, z, street_edge,
     ))
+    # Extra outer absorb from an enlarged ring offset (beyond the nominal setback).
+    absorb_pad = layout.get("outer_absorb_pad") or 0.0
+    if absorb_pad > MIN_AWKWARD_LEFTOVER:
+        non_drivable.extend(setback_landscape_polygons(
+            site_polygon, setback + absorb_pad, z, street_edge,
+        ))
     non_drivable.extend(tip_pocket_islands(site_polygon, layout, z))
     non_drivable.extend(rounded_layout_islands(layout, z))
+    for region in layout.get("absorb_landscape") or []:
+        poly = as_xy_polygon(region)
+        if len(poly) >= 3:
+            non_drivable.append(poly)
 
     standing = list(layout.get("stalls") or [])
     outer, inner = layout_ring_polylines(layout, site_polygon, z)
