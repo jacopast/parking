@@ -1,0 +1,10 @@
+node_modules/
+dist/
+bin/
+obj/
+*.tsbuildinfo
+__pycache__/
+*.pyc
+.env
+.env.local
+.DS_Store

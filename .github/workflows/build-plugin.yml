@@ -1,0 +1,41 @@
+name: Build Rhino plug-in
+
+on:
+  push:
+    branches:
+      - main
+      - "cursor/**"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build Rhino 8 plug-in
+        run: dotnet build plugin/RhinoPluginParking/RhinoPluginParking.csproj --configuration Release
+
+      - name: Create Rhino installer
+        shell: pwsh
+        run: |
+          $output = "plugin/RhinoPluginParking/bin/Release/net8.0-windows"
+          $installer = "artifacts/RhinoPluginParking"
+          New-Item -ItemType Directory -Force -Path $installer | Out-Null
+          Copy-Item "$output/RhinoPluginParking.rhp" $installer
+          Compress-Archive -Path "$installer/*" -DestinationPath "artifacts/RhinoPluginParking.zip"
+          Move-Item "artifacts/RhinoPluginParking.zip" "artifacts/RhinoPluginParking.rhi"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: RhinoPluginParking-installer
+          path: artifacts/RhinoPluginParking.rhi

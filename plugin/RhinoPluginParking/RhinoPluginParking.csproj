@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <TargetExt>.rhp</TargetExt>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <Version>1.0.0</Version>
+    <Title>Rhino Plugin Parking</Title>
+    <Company>Rhino Plugin Parking</Company>
+    <Authors>Rhino Plugin Parking contributors</Authors>
+    <Description>Surface and garage parking feasibility tools for Rhino 8.</Description>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="RhinoCommon" Version="8.32.26160.13001" ExcludeAssets="runtime" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="../../rhino/parking_core.py">
+      <LogicalName>RhinoPluginParking.Scripts.parking_core.py</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="../../rhino/parking_feasibility_panel.py">
+      <LogicalName>RhinoPluginParking.Scripts.parking_feasibility_panel.py</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="../../rhino/parking_layout.py">
+      <LogicalName>RhinoPluginParking.Scripts.parking_layout.py</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+</Project>
