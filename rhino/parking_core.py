@@ -1967,7 +1967,7 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
 
 
 def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
-                     site_polygon=None):
+                     site_polygon=None, entrance_points=None):
     # The PDF workflow uses centerline -> full module envelope -> trim ->
     # stalls. Keep the old tile path only for diagonal emergency fallback.
     if geometry["park_angle"] == 90 and clearance <= 0.001:
@@ -1975,6 +1975,19 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
         steps = max(V_PHASE_STEPS, 12)
         phases = [period * step / float(steps) for step in range(steps)]
         phases.append(0.0)
+        # Entrance alignment (absorbed from the "spine aisle" idea): add phases
+        # that seat a bay aisle centered on the entrance, so a car can drive
+        # straight in instead of being forced into a turn at the mouth. This is
+        # additive — the best-scoring phase still wins, so it never hurts.
+        if entrance_points:
+            _min_u, _max_u, ent_min_v, _max_v = local_bounds(polygon, basis)
+            band_min_v = ent_min_v + geometry["row_depth"]
+            aisle_offset = geometry["row_depth"] + geometry["aisle"] * 0.5
+            for point in entrance_points:
+                _eu, ev = to_local(basis, point[0], point[1])
+                for sign in (-1.0, 1.0):
+                    target_center = ev + sign * aisle_offset
+                    phases.append((target_center - band_min_v) % period)
         best_skeleton = None
         best_rank = None
         seen = set()
@@ -2584,8 +2597,12 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
             pack_basis = basis
             core_poly = as_xy_polygon(inner_poly)
             drive_poly = as_xy_polygon(outer_poly)
+            entrance_points = (
+                access_points_on_street_edge(street_edge) if street_edge else None
+            )
             interior = layout_for_angle(
                 core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
+                entrance_points=entrance_points,
             )
             long_aisle = span_u >= span_v
             ring_meta = {

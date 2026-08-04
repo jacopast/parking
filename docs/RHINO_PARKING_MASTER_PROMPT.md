@@ -130,6 +130,15 @@ STEP D — Exactly THREE aisle-orientation options
   3. Dominant non-street site-edge aligned (longest remaining edge)
   Compare all three completed options; pick the best.
 
+STEP D.5 — Entrance alignment (absorbed "spine aisle" idea)
+  - Project the entrance point(s) inward and add grid phases that seat a bay
+    AISLE on the entrance, so a car drives straight in without an immediate
+    turn at the mouth. This is ADDITIVE to the phase search; the best-scoring
+    phase still wins, so alignment never costs stalls.
+  - Do NOT hard-overwrite orientation to entrance-parallel (a common mistake):
+    that can discard a higher-capacity street-parallel option. Keep all three
+    orientations and let the score / user pick.
+
 STEP E — Bay islands BEFORE stalls (island-centred, NOT aisle-centred)
   The drawn module is the 36 ft BACK-TO-BACK STALL ISLAND, exactly as it is
   drafted by hand. Its 24 ft aisles sit OUTSIDE it and are shared with the
