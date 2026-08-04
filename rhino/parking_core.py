@@ -474,7 +474,14 @@ def filter_ring_served_islands(islands, ring_outer_poly, ring_inner_poly=None):
 
 
 def point_in_stall_xy(x, y, stall):
-    return point_inside([(p[0], p[1]) for p in stall], x, y)
+    polygon = [(p[0], p[1]) for p in stall]
+    # Touching the opposing stall's front stripe at exactly 24 ft is not an
+    # obstruction. point_inside is asymmetric on polygon boundaries, which
+    # previously deleted one side of every double-loaded row.
+    return (
+        point_inside(polygon, x, y)
+        and distance_to_polygon(polygon, x, y) > 1e-6
+    )
 
 
 def stall_has_maneuvering_aisle(stall, site_polygon, occupied_stalls=None, aisle_ft=AISLE_WIDTH):
@@ -1508,24 +1515,59 @@ def containing_interval(intervals, u):
     return None
 
 
+def intersect_interval_sets(left_set, right_set):
+    intersections = []
+    for left0, right0 in left_set:
+        for left1, right1 in right_set:
+            left = max(left0, left1)
+            right = min(right0, right1)
+            if right - left > 0.5:
+                intersections.append((left, right))
+    intersections.sort()
+    return intersections
+
+
+def strip_common_intervals(polygon, basis, v0, v1):
+    """U intervals whose full perpendicular strip stays inside polygon.
+
+    This is a directional erosion: 30 ft across a parking module, zero
+    artificial erosion along its aisle. Sampling every polygon vertex within
+    the strip captures where tapered/concave boundaries change slope.
+    """
+    local = [to_local(basis, p[0], p[1]) for p in as_xy_polygon(polygon)]
+    samples = [v0, v1, 0.5 * (v0 + v1)]
+    for _u, vertex_v in local:
+        if v0 + 0.01 < vertex_v < v1 - 0.01:
+            samples.extend([vertex_v - 0.01, vertex_v + 0.01])
+    samples = sorted(set(round(v, 6) for v in samples))
+
+    common = None
+    for sample_v in samples:
+        intervals = scanline_intervals(polygon, basis, sample_v)
+        if not intervals:
+            return []
+        common = intervals if common is None else intersect_interval_sets(common, intervals)
+        if not common:
+            return []
+    return common or []
+
+
 def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
     """Build double-loaded aisle modules before any stalls are drawn.
 
-    The centerline domain is the chamfered inner-ring core eroded by half
-    the full module (stall + half aisle). A centerline segment therefore
-    exists only where the whole 18/24/18 module fits. Its 24 ft aisle is
-    then extended to the inner-ring curb for actual circulation.
+    The core is eroded only perpendicular to the aisle by half the full
+    module (stall + half aisle). It is not shortened 30 ft along the aisle.
+    A centerline segment exists only where the whole 18/24/18 strip fits.
+    Its 24 ft aisle is then extended to the inner-ring curb.
     """
     half_module = geometry["row_depth"] + geometry["aisle"] * 0.5
-    module_core = offset_polygon(as_xy_polygon(core_polygon), half_module)
-    if not module_core or len(module_core) < 3:
-        return None
-    module_core = chamfer_acute_corners(module_core)
-
     pitch = geometry["stall_pitch"]
     period = geometry["double_module"]
-    min_u, max_u, min_v, max_v = local_bounds(module_core, basis)
-    core_min_u, core_max_u, _core_min_v, _core_max_v = local_bounds(core_polygon, basis)
+    core_min_u, core_max_u, core_min_v, core_max_v = local_bounds(core_polygon, basis)
+    min_v = core_min_v + half_module
+    max_v = core_max_v - half_module
+    if max_v - min_v < 1.0:
+        return None
 
     center_v = min_v + (v_phase % period)
     while center_v > min_v + 1e-9:
@@ -1533,7 +1575,11 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
 
     runs = []
     while center_v <= max_v + 0.001:
-        for left, right in scanline_intervals(module_core, basis, center_v):
+        strip_v0 = center_v - half_module
+        strip_v1 = center_v + half_module
+        for left, right in strip_common_intervals(
+            core_polygon, basis, strip_v0, strip_v1,
+        ):
             count = int((right - left - 0.001) / pitch)
             roles = run_column_roles(count)
             if roles is None:
@@ -1585,7 +1631,7 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase):
         return None
     return {
         "runs": runs,
-        "module_core": module_core,
+        "module_core": None,
         "connected_run_count": len(runs),
         "aisle_length": sum(run["aisle_right"] - run["aisle_left"] for run in runs),
         "stall_count": sum(run["stall_count"] for run in runs),
@@ -1663,9 +1709,9 @@ def layout_for_angle(polygon, basis, clearance, z, geometry):
             if skeleton is None:
                 continue
             rank = (
+                skeleton["stall_count"],
                 skeleton["connected_run_count"],
                 skeleton["aisle_length"],
-                skeleton["stall_count"],
             )
             if best_skeleton is None or rank > best_rank:
                 best_skeleton = skeleton
@@ -1707,14 +1753,14 @@ def layout_for_angle(polygon, basis, clearance, z, geometry):
             if candidate is None:
                 continue
             skeleton_rank = (
+                candidate["stall_count"],
                 candidate.get("connected_run_count", 0),
                 candidate.get("aisle_length", 0.0),
-                candidate["stall_count"],
             )
             best_rank = (
+                best["stall_count"],
                 best.get("connected_run_count", 0),
                 best.get("aisle_length", 0.0),
-                best["stall_count"],
             ) if best else None
             if best is None or skeleton_rank > best_rank:
                 best = candidate
@@ -2015,29 +2061,38 @@ def compose_candidate(
     ):
         return None
 
-    interior_stalls = interior["stalls"] if interior else []
-    combined = list(ring_stalls) + list(interior_stalls)
     ring_outer = ring_meta.get("ring_outer_poly")
     ring_inner = ring_meta.get("ring_inner_poly")
-    driveable = filter_driveable_stalls(
-        combined, site_polygon, ring_outer_poly=ring_outer, ring_inner_poly=ring_inner,
+    # Perimeter stalls need site/tip/ring QA. Interior stalls were generated
+    # as complete paired rows around an explicit 24 ft aisle inside the
+    # chamfered core; running the generic edge-probe filter on them previously
+    # deleted one side of every double-loaded row.
+    perimeter_driveable = filter_driveable_stalls(
+        ring_stalls, site_polygon,
+        ring_outer_poly=ring_outer, ring_inner_poly=ring_inner,
     )
-    driveable = filter_street_access_stalls(driveable, street_edge)
+    perimeter_driveable = filter_street_access_stalls(
+        perimeter_driveable, street_edge,
+    )
+    interior_stalls = list(interior["stalls"]) if interior else []
+    driveable = perimeter_driveable + interior_stalls
     if not driveable:
         return None
 
-    driveable_set = set(id(stall) for stall in driveable)
-    perimeter_kept = sum(1 for stall in ring_stalls if id(stall) in driveable_set)
+    perimeter_kept = len(perimeter_driveable)
     access_pts = access_points_on_street_edge(street_edge) if street_edge else []
-    islands = list(ring_islands or [])
+    perimeter_islands = filter_ring_served_islands(
+        list(ring_islands or []), ring_outer, ring_inner,
+    )
+    perimeter_islands = [
+        island for island in perimeter_islands
+        if not stall_in_acute_tip(
+            island, site_polygon, ring_outer_poly=ring_outer,
+        )
+    ]
+    islands = perimeter_islands
     if interior:
         islands.extend(interior.get("islands") or [])
-    islands = filter_ring_served_islands(islands, ring_outer, ring_inner)
-    # Also drop islands that sit inside the tip dead zone.
-    islands = [
-        island for island in islands
-        if not stall_in_acute_tip(island, site_polygon, ring_outer_poly=ring_outer)
-    ]
 
     pack_angle = basis["angle"]
     street_align = 0
@@ -2088,7 +2143,6 @@ def candidate_rank(candidate):
     if candidate is None:
         return None
     return (
-        1 if candidate.get("connected_run_count", 0) > 0 else 0,
         candidate["stall_count"],
         candidate.get("connected_run_count", 0),
         candidate.get("aisle_length", 0.0),

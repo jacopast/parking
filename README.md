@@ -169,9 +169,9 @@ The packer follows the same order as a manual parking study:
 1. Fix the site boundary and street frontage.
 2. Establish the **site-following perimeter circulation ring first**. Acute ring corners are chamfered; obtuse corners remain.
 3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
-4. Inset that core by **30 ft** (18 ft stall + half of the 24 ft aisle). This is the centerline domain where a complete 18/24/18 double-loaded module can fit.
+4. Apply a **directional 30 ft envelope** perpendicular to each candidate aisle (18 ft stall + half of the 24 ft aisle). Do not shorten the aisle direction by 30 ft.
 5. Build exactly **three aisle-centerline options** through that domain: street-perpendicular, street-parallel, and dominant-edge aligned.
-6. Intersect each centerline with the 30 ft inset, then extend only its 24 ft aisle back to the inner-ring curb. This creates the trimmed module envelopes and ring connections shown in the PDF.
+6. Intersect each complete 60 ft strip with the core, then extend only its 24 ft aisle back to the inner-ring curb. This creates the trimmed module envelopes and ring connections shown in the PDF.
 7. Reject disconnected/short centerlines before stalls exist. Then populate both sides, reserving terminal end-cap islands; long runs get an interior island after every 10 stalls.
 8. Place the perimeter row outside the ring, skipping the street frontage and the full dead zone between each acute site tip and the chamfered ring.
 9. Validate maneuvering and compare the three completed options. A fitted orthogonal racetrack is fallback only when no site-following option works.
