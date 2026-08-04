@@ -3087,6 +3087,127 @@ def rounded_layout_islands(layout, z, radius=CURB_FILLET_RADIUS):
     return rounded
 
 
+def _edge_strip_polygon(ax, ay, bx, by, inward_nx, inward_ny, depth, z=0.0):
+    """Closed strip from a boundary edge inward by ``depth``."""
+    if depth <= 0.0:
+        return None
+    return [
+        (ax, ay, z),
+        (bx, by, z),
+        (bx + inward_nx * depth, by + inward_ny * depth, z),
+        (ax + inward_nx * depth, ay + inward_ny * depth, z),
+    ]
+
+
+def setback_landscape_polygons(site_polygon, setback, z=0.0, street_edge=None):
+    """Perimeter landscape strips between the property line and the setback.
+
+    These are non-drivable. Street driveway throats stay open.
+    """
+    if setback <= 0.0 or not site_polygon or len(site_polygon) < 3:
+        return []
+
+    orientation = 1.0 if signed_area(site_polygon) > 0.0 else -1.0
+    street_index = street_edge.get("index") if street_edge else None
+    strips = []
+    count = len(site_polygon)
+    for index in range(count):
+        ax, ay = site_polygon[index][0], site_polygon[index][1]
+        bx, by = site_polygon[(index + 1) % count][0], site_polygon[(index + 1) % count][1]
+        dx, dy = bx - ax, by - ay
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
+        ux, uy = dx / length, dy / length
+        # Inward normal for CCW polygon is rotate(ux,uy) left = (-uy, ux).
+        nx, ny = -uy * orientation, ux * orientation
+        if street_index is not None and index == street_index:
+            # Keep the setback band but punch driveway gaps.
+            stations = access_points_on_street_edge(street_edge)
+            if not stations:
+                strip = _edge_strip_polygon(ax, ay, bx, by, nx, ny, setback, z)
+                if strip:
+                    strips.append(strip)
+                continue
+            gap = DRIVEWAY_CLEAR * 0.55
+            open_runs = []
+            cursor = 0.0
+            for station in stations:
+                sx, sy = station[0], station[1]
+                t = max(0.0, min(length, (sx - ax) * ux + (sy - ay) * uy))
+                lo, hi = max(0.0, t - gap), min(length, t + gap)
+                if lo > cursor + 1.0:
+                    open_runs.append((cursor, lo))
+                cursor = max(cursor, hi)
+            if length - cursor > 1.0:
+                open_runs.append((cursor, length))
+            for u0, u1 in open_runs:
+                p0 = (ax + ux * u0, ay + uy * u0)
+                p1 = (ax + ux * u1, ay + uy * u1)
+                strip = _edge_strip_polygon(p0[0], p0[1], p1[0], p1[1], nx, ny, setback, z)
+                if strip:
+                    strips.append(strip)
+            continue
+
+        strip = _edge_strip_polygon(ax, ay, bx, by, nx, ny, setback, z)
+        if strip:
+            strips.append(strip)
+    return strips
+
+
+def layout_land_use(site_polygon, layout, setback=0.0, street_edge=None, z=0.0):
+    """Classify the parcel into the three universal land-use sets.
+
+    The site is first split into:
+
+    - ``non_drivable``: cars never roll here — tip pockets, setback landscape,
+      terminal end-caps, mid-row islands / medians.
+    - ``drivable``: everything else inside the site.
+
+    Drivable then splits into:
+
+    - ``standing``: parking stalls (cars at rest).
+    - ``moving``: the residual aisle. The 24 ft aisle is NOT an authored
+      object — it emerges as the gap between non-drivable islands / end-caps
+      and the stall faces. Shaping those green end-caps is what creates (or
+      destroys) a driveable turn.
+
+    Returns filled polygons suitable for preview / Rhino layers.
+    """
+    if not layout:
+        return {
+            "non_drivable": [],
+            "standing": [],
+            "moving_hint": None,
+            "ring_outer": None,
+            "ring_inner": None,
+        }
+
+    non_drivable = []
+    non_drivable.extend(setback_landscape_polygons(
+        site_polygon, setback, z, street_edge,
+    ))
+    non_drivable.extend(tip_pocket_islands(site_polygon, layout, z))
+    non_drivable.extend(rounded_layout_islands(layout, z))
+
+    standing = list(layout.get("stalls") or [])
+    outer, inner = layout_ring_polylines(layout, site_polygon, z)
+
+    return {
+        "non_drivable": non_drivable,
+        "standing": standing,
+        "moving_hint": {
+            # Diagnostic only: authored ring curbs that the green islands must
+            # reproduce as residual gaps. Never draw these as the product aisle.
+            "ring_outer": outer,
+            "ring_inner": inner,
+            "nominal_width": RING_WIDTH,
+        },
+        "ring_outer": outer,
+        "ring_inner": inner,
+    }
+
+
 def _point_in_any(x, y, polys):
     for poly in polys:
         if len(poly) >= 3 and point_inside(poly, x, y):

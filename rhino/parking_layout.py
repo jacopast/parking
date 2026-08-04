@@ -44,6 +44,7 @@ DEFAULT_SETBACK = 5.0
 LAYERS = {
     "root": "Parking Layout",
     "stalls": "Parking Layout::Stalls",
+    "non_drivable": "Parking Layout::NonDrivable",
     "aisles": "Parking Layout::Aisles",
     "circulation": "Parking Layout::Circulation",
     "curbs": "Parking Layout::Curbs",
@@ -61,6 +62,7 @@ def ensure_layer(name, color):
 def setup_layers():
     ensure_layer(LAYERS["root"], (40, 40, 40))
     ensure_layer(LAYERS["stalls"], (255, 183, 3))
+    ensure_layer(LAYERS["non_drivable"], (76, 140, 84))
     ensure_layer(LAYERS["aisles"], (61, 90, 128))
     ensure_layer(LAYERS["circulation"], (17, 138, 178))
     ensure_layer(LAYERS["curbs"], (90, 90, 90))
@@ -245,25 +247,16 @@ def draw_layout(boundary_id, street_edge, setback):
     created.extend(draw_access(polygon, z, layout, access_points, street_edge))
     created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
 
-    # The drawn bay object is the back-to-back stall island, the way it is
-    # drafted by hand. Its 24 ft aisles are the space between islands and
-    # the perimeter ring, so raw aisle rectangles are not drawn.
-    for envelope in core.rounded_bay_envelopes(layout, z):
-        object_id = add_polyline(envelope, LAYERS["aisles"])
+    # Product geometry follows the land-use model:
+    # non-drivable (green) creates the aisle by residual gap; standing = stalls.
+    # Do not author an aisle polyline — the 24 ft drive is the leftover pavement.
+    land = core.layout_land_use(polygon, layout, setback, street_edge, z)
+    for region in land["non_drivable"]:
+        object_id = add_polyline(region, LAYERS["non_drivable"])
         if object_id:
             created.append(object_id)
 
-    for pocket in core.tip_pocket_islands(polygon, layout, z):
-        object_id = add_polyline(pocket, LAYERS["islands"])
-        if object_id:
-            created.append(object_id)
-
-    for island in core.rounded_layout_islands(layout, z):
-        object_id = add_polyline(island, LAYERS["islands"])
-        if object_id:
-            created.append(object_id)
-
-    for stall in layout["stalls"]:
+    for stall in land["standing"]:
         object_id = add_polyline(stall, LAYERS["stalls"])
         if object_id:
             created.append(object_id)

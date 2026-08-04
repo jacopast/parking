@@ -121,12 +121,15 @@ It generates:
 
 ```text
 Parking Layout::Available Area
+Parking Layout::NonDrivable
 Parking Layout::Stalls
-Parking Layout::Aisles
-Parking Layout::Islands
 Parking Layout::Circulation
 Parking Layout::Curbs
 ```
+
+`NonDrivable` is the green land cars must not roll on (setbacks, tip pockets,
+terminal end-caps, mid-islands). The 24 ft aisle is residual pavement between
+those greens and the stall faces — not a separately authored aisle curve.
 
 ## Design basis
 

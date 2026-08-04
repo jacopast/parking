@@ -121,6 +121,26 @@ class BayIslandReferenceTests(unittest.TestCase):
         short_loop = [(0, 0), (40, 0), (40, 40), (0, 40)]
         self.assertFalse(core.ring_drive_is_acceptable(short_loop))
 
+    def test_land_use_splits_non_drivable_and_standing(self):
+        street = core.street_edge_from_index(REFERENCE_SITE, 0)
+        layout = core.best_layout(
+            REFERENCE_SITE,
+            0.0,
+            5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        horizontal = min(
+            core.option_layouts(layout),
+            key=lambda option: abs(core.angle_key(option["angle"])),
+        )
+        land = core.layout_land_use(REFERENCE_SITE, horizontal, 5.0, street, 0.0)
+        self.assertGreater(len(land["non_drivable"]), 0)
+        self.assertEqual(len(land["standing"]), horizontal["stall_count"])
+        # Tip pocket + end-caps/islands are non-drivable; aisle is residual.
+        self.assertIsNotNone(land["moving_hint"])
+        self.assertEqual(land["moving_hint"]["nominal_width"], core.RING_WIDTH)
+
 
 if __name__ == "__main__":
     unittest.main()

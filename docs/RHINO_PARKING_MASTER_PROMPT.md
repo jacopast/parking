@@ -47,11 +47,24 @@ User flow in Rhino:
 
 Layers (Parking Layout):
 - Available Area
-- Stalls
-- Aisles
-- Islands
-- Circulation
-- Curbs
+- NonDrivable   # tip pockets, setbacks, end-caps, mid-islands (GREEN)
+- Stalls        # standing cars
+- Circulation   # street edge / access throats only
+- Curbs         # diagnostic curb returns
+- Islands       # legacy alias; prefer NonDrivable
+
+Land-use model (universal):
+  The parcel is first split into NON-DRIVABLE vs DRIVABLE.
+  NON-DRIVABLE (green) = anything a car must not roll on:
+    setback landscape, tip dead-zone pockets, terminal end-caps,
+    mid-row islands / medians.
+  DRIVABLE then splits into:
+    STANDING = parking stalls
+    MOVING   = residual pavement between non-drivable greens and stall faces
+  The 24 ft aisle is NOT an authored polyline. It EMERGES as the gap created
+  by placing / shaping non-drivable end-caps and medians. A sharp end-cap
+  creates an acute turn; a square or obtuse end-cap creates a legal turn.
+  Score by valid standing stalls only after the moving residual is driveable.
 
 Reload rule: parking_layout.py must force-reload parking_core each run
 (sys.modules.pop) so Rhino does not keep a stale module.
