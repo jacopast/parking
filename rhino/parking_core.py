@@ -912,6 +912,58 @@ def candidate_orientations(polygon, access_points=None, street_edge=None):
     return [angle for angle, _weight in ranked[:MAX_ORIENTATIONS]]
 
 
+def primary_skeleton_orientations(polygon, street_edge=None):
+    """Return the three aisle skeleton directions used for final comparison.
+
+    These correspond to the manual workflow: street perpendicular, street
+    parallel, and the dominant non-street site edge. Duplicate directions
+    modulo 180 degrees are removed.
+    """
+    result = []
+
+    def add(angle):
+        key = angle_key(angle)
+        if all(
+            min(
+                abs(angle_key(existing) - key),
+                180.0 - abs(angle_key(existing) - key),
+            ) > 0.5
+            for existing in result
+        ):
+            result.append(key)
+
+    street_index = street_edge.get("index") if street_edge else None
+    if street_edge:
+        ax, ay = street_edge["a"]
+        bx, by = street_edge["b"]
+        street_angle = math.degrees(math.atan2(by - ay, bx - ax))
+        add(street_angle + 90.0)
+        add(street_angle)
+
+    edges = []
+    for index in range(len(polygon)):
+        if street_index is not None and index == street_index:
+            continue
+        ax, ay = polygon[index]
+        bx, by = polygon[(index + 1) % len(polygon)]
+        length = math.hypot(bx - ax, by - ay)
+        if length < 5.0:
+            continue
+        angle = math.degrees(math.atan2(by - ay, bx - ax))
+        edges.append((length, angle))
+    edges.sort(reverse=True)
+    for _length, angle in edges:
+        add(angle)
+        if len(result) >= 3:
+            break
+
+    for fallback in (0.0, 90.0, 45.0):
+        if len(result) >= 3:
+            break
+        add(fallback)
+    return result[:3]
+
+
 def candidate_angles(polygon, access_points=None, street_edge=None):
     return candidate_orientations(polygon, access_points, street_edge)
 
@@ -1215,7 +1267,9 @@ def bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_ph
                     fits = False
                     break
 
-        columns.append((u, fits, shapes))
+        # Keep only the fit interval. Stall polygons are materialized after
+        # the aisle skeleton has been clipped and accepted.
+        columns.append((u, fits))
         u += pitch
 
     return columns
@@ -1258,44 +1312,46 @@ def island_from_local_shape(basis, shape, z):
     ]
 
 
-def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, max_u, u_phase, z):
+def build_bay_skeleton(
+    polygon, basis, v, geometry, rows, depth, clearance,
+    min_u, max_u, u_phase,
+):
+    """Build and clean one aisle/row skeleton before creating any stalls."""
     columns = bay_columns(polygon, basis, v, geometry, rows, clearance, min_u, max_u, u_phase)
-    runs = []
+    raw_runs = []
     run_start = None
     for index in range(len(columns) + 1):
         fits = columns[index][1] if index < len(columns) else False
         if fits and run_start is None:
             run_start = index
         elif not fits and run_start is not None:
-            runs.append((run_start, index))
+            raw_runs.append((run_start, index))
             run_start = None
 
-    stalls = []
-    aisles = []
-    islands = []
-    run_count = 0
+    runs = []
     v_aisle = v + geometry["row_depth"]
     aisle_depth = geometry["aisle"]
 
-    for start, end in runs:
+    for start, end in raw_runs:
+        # Roles are assigned only after the run has been clipped to the
+        # inner-ring core. This is the manual "clean row ends" step.
         roles = run_column_roles(end - start)
         if roles is None:
             continue
 
-        # Stall span for aisle extent — islands still sit inside this bay.
         stall_indices = [start + offset for offset, role in enumerate(roles) if role == "stall"]
         if not stall_indices:
             continue
         left_u = columns[stall_indices[0]][0]
         right_u = columns[stall_indices[-1]][0] + geometry["stall_pitch"]
-        # Keep aisle covering terminal islands too so the bay still meets the ring.
         bay_left_u = columns[start][0]
         bay_right_u = columns[end - 1][0] + geometry["stall_pitch"]
         aisle_left, aisle_right = extend_aisle_to_ring(
             polygon, basis, bay_left_u, bay_right_u, v_aisle, aisle_depth, clearance, min_u, max_u,
         )
 
-        # A bay is usable when its aisle can reach the ring (after extension).
+        # Because polygon is the actual chamfered inner-ring polygon, touching
+        # its boundary means this aisle really reaches circulation.
         connected = (
             touches_ring(polygon, basis, aisle_left, v, depth, clearance)
             or touches_ring(polygon, basis, aisle_right, v, depth, clearance)
@@ -1305,29 +1361,61 @@ def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, m
         if not connected:
             continue
 
-        for offset, role in enumerate(roles):
-            index = start + offset
-            shapes = columns[index][2]
-            if role == "stall":
-                for shape in shapes:
-                    stalls.append(island_from_local_shape(basis, shape, z))
-            else:
-                # End-cap / interior islands occupy the stall stripe only —
-                # the drive aisle stays open for turning at the row end.
-                for shape in shapes:
-                    islands.append(island_from_local_shape(basis, shape, z))
+        runs.append({
+            "v": v,
+            "rows": rows,
+            "start": start,
+            "end": end,
+            "roles": roles,
+            "columns": columns,
+            "aisle_left": aisle_left,
+            "aisle_right": aisle_right,
+            "v_aisle": v_aisle,
+            "aisle_depth": aisle_depth,
+            "stall_count": roles.count("stall") * rows,
+        })
+
+    return runs
+
+
+def materialize_bay_skeleton(runs, basis, geometry, z):
+    """Populate stalls/islands only after the aisle skeleton is finalized."""
+    stalls = []
+    aisles = []
+    islands = []
+    for run in runs:
+        front_v = run["v"] + geometry["row_depth"]
+        for offset, role in enumerate(run["roles"]):
+            index = run["start"] + offset
+            u = run["columns"][index][0]
+            shapes = [stall_shape(u, front_v, geometry, -1.0)]
+            if run["rows"] == 2:
+                shapes.append(stall_shape(
+                    u, front_v + geometry["aisle"], geometry, 1.0,
+                ))
+            target = stalls if role == "stall" else islands
+            for shape in shapes:
+                target.append(island_from_local_shape(basis, shape, z))
 
         aisles.append(rectangle_world(
             basis,
-            aisle_left,
-            v_aisle,
-            aisle_right - aisle_left,
-            aisle_depth,
+            run["aisle_left"],
+            run["v_aisle"],
+            run["aisle_right"] - run["aisle_left"],
+            run["aisle_depth"],
             z,
         ))
-        run_count += 1
+    return stalls, aisles, islands
 
-    return stalls, aisles, islands, run_count
+
+def place_bay_runs(polygon, basis, v, geometry, rows, depth, clearance, min_u, max_u, u_phase, z):
+    """Compatibility wrapper: skeleton first, then materialize."""
+    runs = build_bay_skeleton(
+        polygon, basis, v, geometry, rows, depth, clearance,
+        min_u, max_u, u_phase,
+    )
+    stalls, aisles, islands = materialize_bay_skeleton(runs, basis, geometry, z)
+    return stalls, aisles, islands, len(runs)
 
 
 def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
@@ -1336,10 +1424,7 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     if period <= 1e-9:
         return None
 
-    stalls = []
-    aisles = []
-    islands = []
-    run_count = 0
+    skeleton_runs = []
 
     start_v = min_v + (v_phase % period)
     while start_v > min_v + 1e-9:
@@ -1348,42 +1433,44 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     v = start_v
     while v <= max_v + 0.001:
         if v + geometry["double_module"] <= max_v + 0.001:
-            bay_stalls, bay_aisles, bay_islands, bay_runs = place_bay_runs(
+            bay_skeleton = build_bay_skeleton(
                 polygon, basis, v, geometry, 2, geometry["double_module"],
-                clearance, min_u, max_u, u_phase, z,
+                clearance, min_u, max_u, u_phase,
             )
-            if bay_runs:
-                stalls.extend(bay_stalls)
-                aisles.extend(bay_aisles)
-                islands.extend(bay_islands)
-                run_count += bay_runs
+            if bay_skeleton:
+                skeleton_runs.extend(bay_skeleton)
                 v += geometry["double_module"]
                 continue
 
         if v + geometry["single_module"] <= max_v + 0.001:
-            bay_stalls, bay_aisles, bay_islands, bay_runs = place_bay_runs(
+            bay_skeleton = build_bay_skeleton(
                 polygon, basis, v, geometry, 1, geometry["single_module"],
-                clearance, min_u, max_u, u_phase, z,
+                clearance, min_u, max_u, u_phase,
             )
-            if bay_runs:
-                stalls.extend(bay_stalls)
-                aisles.extend(bay_aisles)
-                islands.extend(bay_islands)
-                run_count += bay_runs
+            if bay_skeleton:
+                skeleton_runs.extend(bay_skeleton)
                 v += geometry["single_module"]
                 continue
 
         v += geometry["row_depth"] if geometry["row_depth"] > 1.0 else 6.0
 
-    if not stalls:
+    if not skeleton_runs:
         return None
 
+    stalls, aisles, islands = materialize_bay_skeleton(
+        skeleton_runs, basis, geometry, z,
+    )
     return {
         "stalls": stalls,
         "aisles": aisles,
         "islands": islands,
         "stall_count": len(stalls),
-        "run_count": run_count,
+        "run_count": len(skeleton_runs),
+        "connected_run_count": len(skeleton_runs),
+        "aisle_length": sum(
+            run["aisle_right"] - run["aisle_left"] for run in skeleton_runs
+        ),
+        "skeleton_runs": skeleton_runs,
         "angle": basis["angle"],
         "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
@@ -1423,7 +1510,17 @@ def layout_for_angle(polygon, basis, clearance, z, geometry):
             )
             if candidate is None:
                 continue
-            if best is None or candidate["stall_count"] > best["stall_count"]:
+            skeleton_rank = (
+                candidate.get("connected_run_count", 0),
+                candidate.get("aisle_length", 0.0),
+                candidate["stall_count"],
+            )
+            best_rank = (
+                best.get("connected_run_count", 0),
+                best.get("aisle_length", 0.0),
+                best["stall_count"],
+            ) if best else None
+            if best is None or skeleton_rank > best_rank:
                 best = candidate
 
     return best
@@ -1767,6 +1864,8 @@ def compose_candidate(
         "islands": islands,
         "stall_count": len(driveable),
         "run_count": interior["run_count"] if interior else 0,
+        "connected_run_count": interior.get("connected_run_count", 0) if interior else 0,
+        "aisle_length": interior.get("aisle_length", 0.0) if interior else 0.0,
         "angle": pack_angle,
         "park_angle": geometry["park_angle"],
         "flow": geometry["flow"],
@@ -1787,11 +1886,14 @@ def compose_candidate(
 
 
 def candidate_rank(candidate):
-    """Higher tuple wins. Stall count dominates; alignment breaks ties."""
+    """Driveability is mandatory; capacity compares the valid options."""
     if candidate is None:
         return None
     return (
+        1 if candidate.get("connected_run_count", 0) > 0 else 0,
         candidate["stall_count"],
+        candidate.get("connected_run_count", 0),
+        candidate.get("aisle_length", 0.0),
         1 if candidate.get("long_aisle_bonus") else 0,
         candidate.get("street_align", 0),
         1 if candidate.get("ring_mode") == "offset" else 0,
@@ -1909,59 +2011,76 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     for perimeter_stalls, perimeter_islands, ring_outer, clearance in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
-        # Try both island directions; prefer aisles along the longer site axis.
-        if span_u >= span_v:
-            pack_angles = [basis["angle"], basis["angle"] + 90.0]
-        else:
-            pack_angles = [basis["angle"] + 90.0, basis["angle"]]
+        # Establish the ring before any parking grid. The actual chamfered
+        # inner curb is the clipping polygon for the aisle skeleton.
+        outer_poly, inner_poly = ring_band_points(
+            polygon, z, ring_outer, ring_outer + RING_WIDTH,
+        )
+        if not outer_poly or not inner_poly:
+            continue
 
-        for pack_angle in pack_angles:
-            pack_basis = make_basis(origin, pack_angle)
-            interior = layout_for_angle(polygon, pack_basis, clearance, z, geometry)
-            outer_poly, inner_poly = ring_band_points(
-                polygon, z, ring_outer, ring_outer + RING_WIDTH,
-            )
-            long_aisle = (
-                (span_u >= span_v and abs((pack_angle - basis["angle"]) % 180.0) < 1.0)
-                or (span_v > span_u and abs((pack_angle - basis["angle"] - 90.0) % 180.0) < 1.0)
-            )
-            ring_meta = {
-                "ring_mode": "offset",
-                "ring_outer": ring_outer,
-                "ring_inner": ring_outer + RING_WIDTH,
-                "ring_outer_poly": outer_poly,
-                "ring_inner_poly": inner_poly,
-                "long_aisle": long_aisle,
-            }
-            candidate = compose_candidate(
-                perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
-                street_edge, ring_islands=perimeter_islands,
-            )
-            best = better_candidate(best, candidate)
+        pack_basis = basis
+        core_poly = as_xy_polygon(inner_poly)
+        interior = layout_for_angle(core_poly, pack_basis, 0.0, z, geometry)
+        long_aisle = span_u >= span_v
+        ring_meta = {
+            "ring_mode": "offset",
+            "ring_outer": ring_outer,
+            "ring_inner": ring_outer + RING_WIDTH,
+            "ring_outer_poly": outer_poly,
+            "ring_inner_poly": inner_poly,
+            "long_aisle": long_aisle,
+        }
+        candidate = compose_candidate(
+            perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+            street_edge, ring_islands=perimeter_islands,
+        )
+        best = better_candidate(best, candidate)
     return best
 
 
 def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs, street_edge=None):
-    """Trial-and-error: site-following ring first, ortho only as a fallback fill."""
+    """Compare three cleaned aisle skeleton options, then populate the winner."""
     origin = polygon_centroid(polygon)
-    orientations = candidate_orientations(polygon, access_points, street_edge)
+    orientations = primary_skeleton_orientations(polygon, street_edge)
     geometries = [module_geometry(angle, flow, stall_width) for angle, flow in park_configs]
     best = None
+    option_candidates = []
 
     for angle in orientations:
         basis = make_basis(origin, angle)
+        orientation_best = None
         for geometry in geometries:
             # Prefer rings that follow the parcel so the site is not over-cut.
             offset = try_offset_layouts(
                 polygon, basis, z, setback, geometry, stall_width, street_edge,
             )
-            best = better_candidate(best, offset)
+            orientation_best = better_candidate(orientation_best, offset)
+        if orientation_best:
+            option_candidates.append(orientation_best)
+            best = better_candidate(best, orientation_best)
 
-            ortho = try_ortho_layouts(
-                polygon, basis, z, setback, geometry, stall_width, street_edge,
-            )
-            best = better_candidate(best, ortho)
+    # A fitted orthogonal ring is a fallback only. It must not compete against
+    # a valid site-following ring by cutting away most of an irregular site.
+    if best is None:
+        for angle in orientations:
+            basis = make_basis(origin, angle)
+            for geometry in geometries:
+                ortho = try_ortho_layouts(
+                    polygon, basis, z, setback, geometry, stall_width, street_edge,
+                )
+                best = better_candidate(best, ortho)
 
+    if best:
+        best["orientation_options"] = [
+            {
+                "angle": candidate["angle"],
+                "stall_count": candidate["stall_count"],
+                "connected_run_count": candidate.get("connected_run_count", 0),
+                "aisle_length": candidate.get("aisle_length", 0.0),
+            }
+            for candidate in option_candidates
+        ]
     return best
 
 

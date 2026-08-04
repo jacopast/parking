@@ -164,17 +164,17 @@ The Rhino model should use feet.
 
 ## How the surface layout is built
 
-The packer automates the usual sketching loop:
+The packer follows the same order as a manual parking study:
 
-1. Try grid orientations aligned to long site edges (and the access vector).
-2. Seat an **orthogonal circulation racetrack** in that frame so the drive has no oblique corners relative to the stalls.
-3. Place a perimeter stall row on the **outside** of the ring only (backs toward the setback). Skip the street frontage and acute corners.
-4. Fill **everything inside the ring** with a 90 degree double-loaded module grid. Prefer island aisles along the long core axis.
-5. Reserve **terminal (end-cap) landscape islands** at both ends of every parking row so the cross-aisle turn stays clear. Long runs also get interior islands so no more than **10 stalls** sit in a row without a break.
-6. Keep only stalls that have a clear **24 ft** maneuvering aisle in front (SUDAS/ULI 90° rule). Leave a **dead zone** in sharp tips: no stalls between the site corner and the chamfered ring curb (same as a hand-drawn layout). Entry/exit throats project **straight inward** from the street, not diagonally to a ring vertex.
-7. Circulation may follow the site. **Obtuse aisle corners are fine**; only acute corners (< 90°) are chamfered or rejected. Do not shrink the whole lot to a tiny rectangle just to force 90° turns.
-8. Leave clear **entry/exit driveway throats** on the street frontage with no stalls in those openings.
-9. Keep the trial with the most driveable stalls (site fill first).
+1. Fix the site boundary and street frontage.
+2. Establish the **site-following perimeter circulation ring first**. Acute ring corners are chamfered; obtuse corners remain.
+3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
+4. Build exactly **three aisle-skeleton options**: street-perpendicular, street-parallel, and dominant-edge aligned.
+5. Clip each aisle/row skeleton to the inner ring and clean its ends. Disconnected or short runs are rejected before stalls exist.
+6. After the skeleton is valid, populate its stalls and reserve terminal end-cap islands. Long runs get an interior island after every 10 stalls.
+7. Place the perimeter row outside the ring, skipping the street frontage and the full dead zone between each acute site tip and the chamfered ring.
+8. Validate a clear **24 ft** maneuvering aisle and straight inward entry/exit throats.
+9. Compare the three completed, driveable options and return the highest-capacity layout. A fitted orthogonal racetrack is fallback only when no site-following option works.
 
 Active packing is 90 degree two-way only. Diagonal 60/45 is last-resort if perpendicular search returns nothing. That matches the [ESGI 91 Arup study](https://miis.maths.ox.ac.uk/726/1/ESGI91-Arup_CaseStudy.pdf): perpendicular double-row modules pack best, and finite sites need orientation + shift search.
 

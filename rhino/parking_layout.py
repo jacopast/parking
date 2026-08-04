@@ -277,12 +277,25 @@ def main():
 
     layout = draw_layout(boundary_id, street_edge, setback)
     if layout:
+        option_lines = []
+        for index, option in enumerate(layout.get("orientation_options", [])):
+            option_lines.append(
+                "Option %s: %.0f deg / %s stalls" % (
+                    index + 1,
+                    option["angle"],
+                    option["stall_count"],
+                )
+            )
+        option_summary = "\n".join(option_lines)
+        if option_summary:
+            option_summary = "\n\nThree aisle skeletons tested:\n" + option_summary
+
         rs.MessageBox(
             "Stalls: %s (%s on the perimeter)\n"
             "Parking: %s degree %s bays\n"
             "Aisle orientation: %.0f degrees\n"
             "Street frontage length: %.0f ft\n"
-            "Accessible stalls required: %s including %s van" % (
+            "Accessible stalls required: %s including %s van%s" % (
                 layout["stall_count"],
                 layout["perimeter_stalls"],
                 layout["park_angle"],
@@ -291,6 +304,7 @@ def main():
                 street_edge["length"],
                 layout["ada"]["accessible"],
                 layout["ada"]["van"],
+                option_summary,
             ),
             64,
             "Parking Layout",
