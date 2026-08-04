@@ -33,22 +33,20 @@ class BayIslandReferenceTests(unittest.TestCase):
             key=lambda option: abs(core.angle_key(option["angle"])),
         )
 
-        self.assertEqual(horizontal["run_count"], 5)
-        self.assertEqual(horizontal["stall_count"], 166)
+        self.assertEqual(horizontal["run_count"], 4)
+        self.assertEqual(horizontal["stall_count"], 162)
         self.assertEqual(horizontal["perimeter_stalls"], 76)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
-            90,
+            86,
         )
         double_loaded = [
             run for run in horizontal["skeleton_runs"] if len(run["rows"]) == 2
         ]
-        single_loaded = [
-            run for run in horizontal["skeleton_runs"] if len(run["rows"]) == 1
-        ]
         self.assertEqual(len(double_loaded), 4)
-        self.assertEqual(len(single_loaded), 1)
-        self.assertTrue(all(len(run["rows"]) == 2 for run in double_loaded))
+        self.assertTrue(
+            all(len(run["rows"]) == 2 for run in horizontal["skeleton_runs"])
+        )
         # Tip dead-zone landscape sits outside the ring, not in the aisle.
         outer = core.as_xy_polygon(horizontal["ring_outer_poly"])
         pockets = core.tip_pocket_islands(REFERENCE_SITE, horizontal, 0.0)
@@ -175,6 +173,37 @@ class GeometryFailureRegressionTests(unittest.TestCase):
         flags = [False, True, True, False, True, True, True, False, True]
         self.assertEqual(core.all_true_spans(flags, 2), [(1, 3), (4, 7)])
         self.assertEqual(core.all_true_spans(flags, 1)[-1], (8, 9))
+
+    def test_remainder_strip_does_not_block_neighbour_aisle(self):
+        """Single-loaded leftovers must not sit inside a double-loaded aisle."""
+        rect = [(0, 0), (300, 0), (300, 400), (0, 400)]
+        street = core.street_edge_from_index(rect, 0)
+        layout = core.best_layout(
+            rect, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        self.assertIsNotNone(layout)
+        geom = core.module_geometry(layout["park_angle"], layout["flow"])
+        bands = []
+        for index, run in enumerate(layout["skeleton_runs"]):
+            for row in run["rows"]:
+                sv0, sv1 = core._row_v_range(geom, run["center_v"], row["sign"])
+                av0, av1 = core._aisle_v_range(geom, run["center_v"], row["sign"])
+                bands.append((index, "stall", sv0, sv1, row["u0"], row["u1"]))
+                bands.append((index, "aisle", av0, av1, row["u0"], row["u1"]))
+        for stall in bands:
+            if stall[1] != "stall":
+                continue
+            for aisle in bands:
+                if aisle[1] != "aisle" or aisle[0] == stall[0]:
+                    continue
+                v_hit = stall[2] < aisle[3] - 0.01 and stall[3] > aisle[2] + 0.01
+                u_hit = stall[4] < aisle[5] - 0.01 and stall[5] > aisle[4] + 0.01
+                self.assertFalse(
+                    v_hit and u_hit,
+                    msg="stall run %s blocks aisle of run %s" % (stall[0], aisle[0]),
+                )
 
     def test_u_shape_layout_does_not_invent_courtyard_stalls(self):
         street = core.street_edge_from_index(self.U_SHAPE, 0)

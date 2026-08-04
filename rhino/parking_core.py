@@ -2133,7 +2133,10 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
         center_v -= period
 
     runs = []
-    occupied_v = []  # (lo, hi) bands claimed by double-loaded bays
+    # Claim the full module envelope (both aisles + island). A remainder strip
+    # that only avoids the 36 ft island can sit inside a neighbour's 24 ft
+    # aisle and landlock a whole stall row.
+    occupied_v = []
     while center_v <= max_v + 0.001:
         if center_v < min_v - 0.001:
             center_v += period
@@ -2144,11 +2147,15 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
         )
         for run in bays:
             runs.append(run)
-            occupied_v.append((center_v - depth, center_v + depth))
+            occupied_v.append((
+                center_v - depth - aisle,
+                center_v + depth + aisle,
+            ))
         center_v += period
 
     # Remainder single-loaded strips above / below the double-loaded lattice.
-    # A single-loaded module needs 18 + 24 = single_module feet.
+    # A single-loaded module needs 18 + 24 = single_module feet of clear band
+    # that does not collide with any existing stall OR aisle.
     def gap_free(v0, v1):
         for lo, hi in occupied_v:
             if v0 < hi - 0.01 and v1 > lo + 0.01:
@@ -2171,7 +2178,15 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
             core_polygon, drive_polygon, basis, geometry,
             center_v, sign, core_min_u, core_max_u, site_polygon,
         ):
+            # Belt-and-suspenders: reject if this strip overlaps any claimed band.
+            sv0, sv1 = _row_v_range(geometry, bay["center_v"], sign)
+            av0, av1 = _aisle_v_range(geometry, bay["center_v"], sign)
+            band_lo = min(sv0, av0)
+            band_hi = max(sv1, av1)
+            if not gap_free(band_lo, band_hi):
+                continue
             runs.append(bay)
+            occupied_v.append((band_lo, band_hi))
 
     if not runs:
         return None
