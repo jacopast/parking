@@ -161,6 +161,7 @@ Accessible stall counts come from the [2010 ADA Standards, Table 208.2](https://
 | Stall stripe length | 18 ft |
 | Ring drive | 24 ft |
 | Curb / terminal-island fillet | 5 ft nominal (locally limited by short edges) |
+| Two-way ring corner fillet | 15 ft nominal; acute tips use one 90° + one obtuse chamfer |
 | Efficiency target | 330 square feet per stall or better |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
@@ -173,7 +174,10 @@ The Rhino model should use feet.
 The packer follows the same order as a manual parking study:
 
 1. Fix the site boundary and street frontage.
-2. Establish the **site-following perimeter circulation ring first**. Acute ring corners are chamfered; obtuse corners remain.
+2. Establish the **site-following perimeter circulation ring first**. Acute
+   tips are chamfered asymmetrically so one new corner is 90° and the other
+   is obtuse. Both mirrored chamfers are developed and the higher-capacity
+   completed layout wins; the straight ring remains 24 ft wide.
 3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
 4. Apply a **directional 30 ft envelope** perpendicular to each candidate aisle (18 ft stall + half of the 24 ft aisle). Do not shorten the aisle direction by 30 ft.
 5. Build exactly **three aisle-centerline options** through that domain: street-perpendicular, street-parallel, and dominant-edge aligned.

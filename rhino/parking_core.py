@@ -262,11 +262,14 @@ def drive_path_has_sharp_turn(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG):
     return polygon_min_interior_angle(poly) < min_corner_deg - 0.5
 
 
-def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG, max_passes=10):
-    """Attenuates acute tips so a drive loop never turns sharper than 90 deg.
+def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG,
+                          max_passes=10, right_angle_side=1):
+    """Replace each acute tip with an asymmetric right-angle chamfer.
 
-    Obtuse corners are left alone. This lets site-following rings keep most of
-    the parcel instead of collapsing to a tiny inscribed rectangle.
+    Equal cuts make two merely-obtuse corners and discard more parking field.
+    An asymmetric cut makes one new corner exactly 90 degrees and the other
+    obtuse. ``right_angle_side`` chooses which incident edge gets the square
+    turn; callers can test both and retain the layout with more final stalls.
     """
     poly = [(p[0], p[1]) for p in as_xy_polygon(polygon)]
     if len(poly) < 3:
@@ -296,27 +299,45 @@ def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG, max_pass
             if d_prev < 2.0 or d_next < 2.0:
                 continue
 
-            # Blunt tips deep enough for a two-way turn. Packing still uses the
-            # chamfered polygon (fillets are curb-only), so we can cut a real
-            # face without collapsing the core with R15 arcs.
+            # A 30 ft far cut at a ~53 degree tip gives a ~24 ft chamfer face.
+            # The corner is already wider than the nominal 24 ft aisle, so do
+            # not sacrifice stalls with the previous 60 ft symmetric cut.
             angle = interior_angle_deg(poly, index)
-            target = max(RING_WIDTH * 1.5, RING_CORNER_RADIUS * 1.5)
+            target = max(RING_WIDTH, STALL_STRIPE * 0.75)
             if angle < 60.0:
-                target = max(target, RING_WIDTH * 2.5)
-            elif angle < 75.0:
-                target = max(target, RING_WIDTH * 2.0)
-            cut = min(d_prev, d_next, target, min(d_prev, d_next) * 0.7)
-            if cut < 1.0:
+                target = max(target, RING_WIDTH * 1.25)
+
+            cosine = max(0.05, math.cos(math.radians(angle)))
+            if right_angle_side >= 0:
+                # Far cut on next edge; cut_prev = cut_next*cos(angle)
+                # makes the chamfer perpendicular to the previous edge.
+                far = min(
+                    target,
+                    d_next * 0.85,
+                    d_prev * 0.85 / cosine,
+                )
+                cut_prev = far * cosine
+                cut_next = far
+            else:
+                # Mirrored candidate: square turn on the next edge.
+                far = min(
+                    target,
+                    d_prev * 0.85,
+                    d_next * 0.85 / cosine,
+                )
+                cut_prev = far
+                cut_next = far * cosine
+            if min(cut_prev, cut_next) < 1.0:
                 new_poly.append(curr)
                 continue
 
             p1 = (
-                curr[0] + (prev[0] - curr[0]) * (cut / d_prev),
-                curr[1] + (prev[1] - curr[1]) * (cut / d_prev),
+                curr[0] + (prev[0] - curr[0]) * (cut_prev / d_prev),
+                curr[1] + (prev[1] - curr[1]) * (cut_prev / d_prev),
             )
             p2 = (
-                curr[0] + (nxt[0] - curr[0]) * (cut / d_next),
-                curr[1] + (nxt[1] - curr[1]) * (cut / d_next),
+                curr[0] + (nxt[0] - curr[0]) * (cut_next / d_next),
+                curr[1] + (nxt[1] - curr[1]) * (cut_next / d_next),
             )
             new_poly.append(p1)
             new_poly.append(p2)
@@ -2390,6 +2411,7 @@ def compose_candidate(
         "ring_inner": ring_meta.get("ring_inner", 0.0),
         "ring_outer_poly": ring_meta.get("ring_outer_poly"),
         "ring_inner_poly": ring_meta.get("ring_inner_poly"),
+        "chamfer_side": ring_meta.get("chamfer_side"),
         "ortho_bonus": 1 if ring_meta["ring_mode"] == "ortho" else 0,
         "long_aisle_bonus": 1 if ring_meta.get("long_aisle") else 0,
         "street_align": street_align,
@@ -2547,35 +2569,39 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
         perimeter_stalls = variant["stalls"]
         perimeter_islands = variant["islands"]
         ring_outer = variant["ring_outer"]
-        # Establish the ring before any parking grid. The actual chamfered
-        # inner curb is the clipping polygon for the aisle skeleton.
-        outer_poly, inner_poly = ring_band_points(
-            polygon, z, ring_outer, ring_outer + RING_WIDTH,
-            edge_outer=variant["edge_outer"],
-        )
-        if not outer_poly or not inner_poly:
-            continue
+        # An acute tip has two valid asymmetric chamfers. One makes the
+        # previous side square, the other makes the next side square. Develop
+        # both complete layouts and keep the one with more final stalls.
+        for chamfer_side in (-1, 1):
+            outer_poly, inner_poly = ring_band_points(
+                polygon, z, ring_outer, ring_outer + RING_WIDTH,
+                edge_outer=variant["edge_outer"],
+                chamfer_side=chamfer_side,
+            )
+            if not outer_poly or not inner_poly:
+                continue
 
-        pack_basis = basis
-        core_poly = as_xy_polygon(inner_poly)
-        drive_poly = as_xy_polygon(outer_poly)
-        interior = layout_for_angle(
-            core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
-        )
-        long_aisle = span_u >= span_v
-        ring_meta = {
-            "ring_mode": "offset",
-            "ring_outer": ring_outer,
-            "ring_inner": ring_outer + RING_WIDTH,
-            "ring_outer_poly": outer_poly,
-            "ring_inner_poly": inner_poly,
-            "long_aisle": long_aisle,
-        }
-        candidate = compose_candidate(
-            perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
-            street_edge, ring_islands=perimeter_islands,
-        )
-        best = better_candidate(best, candidate)
+            pack_basis = basis
+            core_poly = as_xy_polygon(inner_poly)
+            drive_poly = as_xy_polygon(outer_poly)
+            interior = layout_for_angle(
+                core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
+            )
+            long_aisle = span_u >= span_v
+            ring_meta = {
+                "ring_mode": "offset",
+                "ring_outer": ring_outer,
+                "ring_inner": ring_outer + RING_WIDTH,
+                "ring_outer_poly": outer_poly,
+                "ring_inner_poly": inner_poly,
+                "long_aisle": long_aisle,
+                "chamfer_side": chamfer_side,
+            }
+            candidate = compose_candidate(
+                perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
+                street_edge, ring_islands=perimeter_islands,
+            )
+            best = better_candidate(best, candidate)
     return best
 
 
@@ -2665,7 +2691,7 @@ def option_layouts(layout):
 
 
 def ring_band_points(polygon, z, outer_distance, inner_distance,
-                     edge_outer=None):
+                     edge_outer=None, chamfer_side=1):
     """Return the ring drive as (outer, inner) closed point lists.
 
     Acute tips are chamfered so the drive never asks for a sub-90 turn, while
@@ -2683,8 +2709,12 @@ def ring_band_points(polygon, z, outer_distance, inner_distance,
     if not outer or not inner:
         return None, None
 
-    outer = chamfer_acute_corners(outer)
-    inner = chamfer_acute_corners(inner)
+    outer = chamfer_acute_corners(
+        outer, right_angle_side=chamfer_side,
+    )
+    inner = chamfer_acute_corners(
+        inner, right_angle_side=chamfer_side,
+    )
     if len(outer) < 3 or len(inner) < 3:
         return None, None
 

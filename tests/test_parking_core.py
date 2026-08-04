@@ -34,8 +34,8 @@ class BayIslandReferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(horizontal["run_count"], 4)
-        self.assertEqual(horizontal["stall_count"], 159)
-        self.assertEqual(horizontal["perimeter_stalls"], 73)
+        self.assertEqual(horizontal["stall_count"], 166)
+        self.assertEqual(horizontal["perimeter_stalls"], 80)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
             86,
@@ -60,6 +60,21 @@ class BayIslandReferenceTests(unittest.TestCase):
             core.polygon_min_interior_angle(outer),
             core.MIN_DRIVE_CORNER_DEG - 0.5,
         )
+        # The asymmetric tip chamfer has one square turn and one obtuse turn.
+        square_corners = [
+            core.interior_angle_deg(outer, index)
+            for index in range(len(outer))
+            if abs(core.interior_angle_deg(outer, index) - 90.0) < 0.1
+        ]
+        self.assertGreaterEqual(len(square_corners), 2)
+        self.assertIn(horizontal["chamfer_side"], (-1, 1))
+        inner = core.as_xy_polygon(horizontal["ring_inner_poly"])
+        for x, y in inner:
+            self.assertAlmostEqual(
+                core.distance_to_polygon(outer, x, y),
+                core.RING_WIDTH,
+                delta=0.1,
+            )
 
 
 if __name__ == "__main__":

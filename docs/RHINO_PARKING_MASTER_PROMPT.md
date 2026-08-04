@@ -109,6 +109,11 @@ STEP B — Circulation ring FIRST (site-following)
     neighbouring offset lines to rebuild the vertices.
   - Ring drive band width = 24 ft.
   - Offset polygon inward; CHAMFER only corners with interior angle < 90°.
+  - At an acute tip, prefer an ASYMMETRIC chamfer: one new drive corner is
+    exactly 90° and the other is obtuse. Evaluate the two mirrored chamfers
+    and keep the completed layout with more valid stalls.
+  - The straight ring width stays 24 ft. The open corner junction is naturally
+    wider; do not over-cut it and lose stalls merely to create extra pavement.
   - Obtuse corners stay. Never collapse irregular sites to a tiny ortho
     rectangle just to force square turns.
   - Prefer site-following offset ring. Orthogonal racetrack is FALLBACK only
@@ -222,7 +227,8 @@ R3. No stalls in acute tips / unreachable tip dead zones beyond the
     chamfered ring.
 R4. No stalls blocking street entry/exit throats.
 R5. Drive aisle corners may be obtuse or 90°; acute (<90°) drive corners
-    are forbidden. Chamfer sharp tips; do not over-cut the whole site.
+    are forbidden. Prefer one square + one obtuse chamfer corner, test both
+    mirrored sides, and do not over-cut the already-wider corner junction.
 R6. Every interior bay aisle must connect to the perimeter ring.
 R7. Terminal islands at BOTH ends of every parking row; max 10 stalls
     between islands.
@@ -264,8 +270,10 @@ Final layout dict:
 ═══════════════════════════════════════════════════════════════════════════════
 
 A. Offset polygon inward by distance (vertex bisector method).
-B. Chamfer acute corners (<90°) with cuts deep enough to blunt the tip
-   without eating >~50% of an edge; deeper on very sharp tips.
+B. Chamfer acute corners (<90°) asymmetrically so one new corner is 90° and
+   the other is obtuse. Test both mirrored sides and score by final stalls.
+   A ~30 ft far cut on a ~53° tip creates an approximately 24 ft face without
+   the capacity loss of a deep symmetric cut.
 C. Tip keep-out triangles: cut from tip along both edges by tip_clearance_depth
    (from wedge width needed for stall+ring); deepen to ring curb when available.
 D. primary_skeleton_orientations → exactly 3 angles.
