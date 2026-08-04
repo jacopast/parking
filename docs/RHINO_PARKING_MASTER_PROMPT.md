@@ -189,10 +189,17 @@ STEP F — Per-column, per-ROW fitting (this is what makes tapers work)
   - For each column test each row separately:
       stall cell [u, u+9] x 18 ft   inside PARK region, and
       aisle cell [u, u+9] x 24 ft   in front of it inside DRIVE region.
-  - Keep the longest contiguous fitting span PER ROW.
+  - Keep EVERY contiguous fitting span PER ROW that meets the minimum
+    column count (not only the longest). Pair overlapping opposite-side
+    spans into independent bay islands so U / L / notched parcels do not
+    drop a whole lobe on one band.
   - DO NOT require one common rectangle across the whole 60 ft strip.
     That is the bug that truncates every row to the narrowest scanline and
     leaves tapered parcels half empty.
+  - After the double-loaded lattice, fill leftover v-strips ≥ 42 ft with
+    single-loaded modules (18 + 24).
+  - After packing, flood-fill driveable cells from street access and drop
+    stalls whose aisle is not reachable (disconnected concave lobes).
   - Two rows of the same island therefore have DIFFERENT lengths on a
     tapered site, and the island end steps/tapers with the parcel edge.
   - Minimum usable stall columns after end-caps: MIN_RUN_COLUMNS (3).
