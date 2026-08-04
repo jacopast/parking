@@ -150,6 +150,8 @@ class BayIslandReferenceTests(unittest.TestCase):
                 for region in land["non_drivable"]),
             msg="absorb leftover must appear in non_drivable land use",
         )
+
+    def test_land_use_splits_non_drivable_and_standing(self):
         street = core.street_edge_from_index(REFERENCE_SITE, 0)
         layout = core.best_layout(
             REFERENCE_SITE,
