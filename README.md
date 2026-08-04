@@ -229,11 +229,14 @@ This gives a practical first-pass answer on whether a garage is needed and what 
 ## Run the Python sources without installing
 
 1. Open the target `.3dm` file in Rhino.
-2. Make sure the usable site boundary is a closed curve or polyline.
-3. Run `RunPythonScript`.
-4. Select one of the scripts in the `rhino/` folder.
-5. Follow the prompts or panel controls.
-6. Review the generated layers and summary labels.
+2. Make sure each usable site boundary is a closed curve or polyline.
+3. Run `RunPythonScript` and choose `rhino/parking_layout.py`.
+4. Select **one or more** closed available-area curves (preselect works).
+   Each site is designed independently: its own street edge, its own layout,
+   grouped as `Parking Layout — Site N`.
+5. Enter a shared setback. With multiple sites, choose auto-best orientation
+   for every parcel, or pick the aisle option per site.
+6. Review the generated layers and the combined MessageBox summary.
 
 ## Validation
 

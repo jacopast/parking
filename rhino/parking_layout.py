@@ -1,17 +1,13 @@
 """Create a driveable surface parking layout inside Rhino.
 
-Run with Rhino's RunPythonScript command. Pick a closed usable area curve,
-then select one existing edge of that curve as the street frontage.
-Do not draw a new line.
+Run with Rhino's RunPythonScript command. Pick one OR MORE closed usable-area
+curves. Each site is designed independently: for every boundary you pick its
+own street frontage edge, then a layout is generated for that parcel alone.
 
-The layout uses circulation-first packing:
+The layout uses circulation-first packing and the land-use model:
 
-    find orientation -> orthogonal ring drive -> outer stalls on the ring -> core grid
-
-Trial-and-error searches aisle orientation and racetrack seating so the loop
-stays orthogonal to the stall grid. Only the outside of the ring gets a
-perimeter stall row; the inside is filled with a double-loaded module grid.
-Short or unconnected bay runs are trimmed away. No text is drawn.
+    non-drivable greens (end-caps / tip / setback) create residual 24 ft aisles
+    standing = stalls
 """
 
 import math
@@ -35,7 +31,7 @@ if not hasattr(core, "street_edge_from_pick"):
     raise ImportError(
         "parking_core.py is outdated or from the wrong folder.\n"
         "Keep parking_layout.py and parking_core.py together, then re-download:\n"
-        "https://github.com/jacopast/parking/archive/refs/heads/cursor/rhino-parking-layout-e880.zip"
+        "https://github.com/jacopast/parking/archive/refs/heads/cursor/complete-bay-island-layout-e880.zip"
     )
 
 
@@ -107,26 +103,26 @@ def draw_curbs(polygon, z, layout, setback, street_edge):
     return created
 
 
-def pick_street_edge(boundary_id, polygon, z):
-    """Select one existing side of the site — nothing new to draw."""
+def pick_street_edge(boundary_id, polygon, z, site_label=None):
+    """Select one existing side of this site — nothing new to draw."""
+    title = "Parking Layout"
+    if site_label:
+        title = "Parking Layout — %s" % site_label
+        rs.Prompt("Street frontage for %s: pick an existing boundary edge." % site_label)
     street_edge = core.pick_street_edge(polygon, z, rs, boundary_id)
     if not street_edge:
         rs.MessageBox(
-            "Select one existing edge of the site boundary that fronts the street.\n"
+            "Select one existing edge of this site boundary that fronts the street.\n"
             "You do not need to draw a new line.",
             48,
-            "Parking Layout",
+            title,
         )
         return None
     return street_edge
 
 
 def draw_ring(polygon, z, layout):
-    """Ring faces are emitted through build_curb_polylines (already filleted).
-
-    Keeping a second sharp polyline here stacked under the curb arcs and made
-    24 ft two-way corners look impassable.
-    """
+    """Ring faces are emitted through build_curb_polylines (already filleted)."""
     return []
 
 
@@ -163,7 +159,6 @@ def draw_access(polygon, z, layout, access_points, street_edge=None):
         access = core.as_tuple(point)
         target = core.driveway_throat_target(access, street_edge, polygon, outer, inner)
         if not target:
-            # Fallback: fixed depth along the street inward normal.
             depth = 0.5 * (layout.get("ring_outer", 0.0) + layout.get("ring_inner", core.RING_WIDTH))
             if depth < 1.0:
                 depth = core.RING_WIDTH
@@ -175,7 +170,6 @@ def draw_access(polygon, z, layout, access_points, street_edge=None):
             rs.ObjectLayer(center, LAYERS["circulation"])
             created.append(center)
 
-        # Driveway width edges stay parallel to the street (true curb-cut throat).
         half = clear * 0.5
         for sign in (-1.0, 1.0):
             ox, oy = sx * half * sign, sy * half * sign
@@ -190,11 +184,13 @@ def draw_access(polygon, z, layout, access_points, street_edge=None):
     return created
 
 
-def choose_option(layout):
-    """Let the user take any of the three developed aisle options."""
+def choose_option(layout, site_label=None, auto_best=False):
+    """Pick among the three developed aisle options for this site alone."""
     options = core.option_layouts(layout)
-    if len(options) < 2:
+    if not options:
         return layout
+    if len(options) < 2 or auto_best:
+        return options[0]
 
     labels = []
     for index, option in enumerate(options):
@@ -202,12 +198,13 @@ def choose_option(layout):
             index + 1, option["angle"], option["stall_count"],
         ))
 
-    picked = rs.ListBox(
-        labels,
-        "Three aisle orientations were developed. Which one should be drawn?",
-        "Parking Layout",
-        labels[0],
-    )
+    title = "Parking Layout"
+    prompt = "Three aisle orientations were developed. Which one should be drawn?"
+    if site_label:
+        title = "Parking Layout — %s" % site_label
+        prompt = "%s\n%s" % (site_label, prompt)
+
+    picked = rs.ListBox(labels, prompt, title, labels[0])
     if not picked:
         return options[0]
     for label, option in zip(labels, options):
@@ -216,23 +213,18 @@ def choose_option(layout):
     return options[0]
 
 
-def draw_layout(boundary_id, street_edge, setback):
+def draw_layout(boundary_id, street_edge, setback, site_label=None, auto_best=False):
+    """Generate geometry for ONE site. Call once per selected boundary."""
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
-        rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
-        return None
+        return None, "Could not read the selected available area."
 
     access_points = core.access_points_on_street_edge(street_edge)
     layout = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
     if layout:
-        layout = choose_option(layout)
+        layout = choose_option(layout, site_label=site_label, auto_best=auto_best)
     if not layout:
-        rs.MessageBox(
-            "No parking bay fits inside the perimeter drive. Try a smaller setback or a larger site.",
-            48,
-            "Parking Layout",
-        )
-        return None
+        return None, "No parking bay fits inside the perimeter drive."
 
     setup_layers()
     created = []
@@ -247,9 +239,6 @@ def draw_layout(boundary_id, street_edge, setback):
     created.extend(draw_access(polygon, z, layout, access_points, street_edge))
     created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
 
-    # Product geometry follows the land-use model:
-    # non-drivable (green) creates the aisle by residual gap; standing = stalls.
-    # Do not author an aisle polyline — the 24 ft drive is the leftover pavement.
     land = core.layout_land_use(polygon, layout, setback, street_edge, z)
     for region in land["non_drivable"]:
         object_id = add_polyline(region, LAYERS["non_drivable"])
@@ -261,75 +250,164 @@ def draw_layout(boundary_id, street_edge, setback):
         if object_id:
             created.append(object_id)
 
+    group_name = "Parking Layout"
+    if site_label:
+        group_name = "Parking Layout — %s" % site_label
     if created:
-        group = rs.AddGroup("Parking Layout")
+        group = rs.AddGroup(group_name)
         if group:
             rs.AddObjectsToGroup(created, group)
 
     rs.Redraw()
-    return layout
+    return layout, None
+
+
+def collect_site_curves():
+    """One or more closed usable-area curves. Each becomes its own design."""
+    preselected = rs.SelectedObjects() or []
+    candidates = [
+        object_id for object_id in preselected
+        if rs.IsCurve(object_id) and rs.IsCurveClosed(object_id)
+    ]
+    if candidates:
+        return candidates
+
+    selected = rs.GetObjects(
+        "Select one or more closed available-area curves (each site is designed separately)",
+        rs.filter.curve,
+        preselect=True,
+        select=True,
+    )
+    if not selected:
+        return []
+    return list(selected)
 
 
 def main():
-    boundary_id = rs.GetObject(
-        "Select the closed available area curve for the parking layout",
-        rs.filter.curve,
-        preselect=True,
-    )
-    if not boundary_id:
+    boundary_ids = collect_site_curves()
+    if not boundary_ids:
         return
 
-    if not rs.IsCurveClosed(boundary_id):
-        rs.MessageBox("Use a closed available area curve for the automatic layout.", 48, "Parking Layout")
+    sites = []
+    for index, boundary_id in enumerate(boundary_ids):
+        if not rs.IsCurveClosed(boundary_id):
+            rs.MessageBox(
+                "Site %s is not a closed curve and will be skipped." % (index + 1),
+                48,
+                "Parking Layout",
+            )
+            continue
+        polygon, z = core.boundary_polygon(boundary_id, rs)
+        if not polygon:
+            rs.MessageBox(
+                "Site %s could not be read and will be skipped." % (index + 1),
+                48,
+                "Parking Layout",
+            )
+            continue
+        sites.append({
+            "id": boundary_id,
+            "polygon": polygon,
+            "z": z,
+            "label": "Site %s" % (index + 1),
+        })
+
+    if not sites:
+        rs.MessageBox("No valid closed site curves were selected.", 48, "Parking Layout")
         return
 
-    polygon, z = core.boundary_polygon(boundary_id, rs)
-    if not polygon:
-        rs.MessageBox("Could not read the selected available area.", 16, "Parking Layout")
-        return
-
-    street_edge = pick_street_edge(boundary_id, polygon, z)
-    if not street_edge:
-        return
-
-    setback = get_number("Setback from the property line in feet", DEFAULT_SETBACK, 0.0)
+    setback = get_number("Setback from the property line in feet (applied to every site)", DEFAULT_SETBACK, 0.0)
     if setback is None:
         return
 
-    layout = draw_layout(boundary_id, street_edge, setback)
-    if layout:
-        option_lines = []
-        for index, option in enumerate(layout.get("orientation_options", [])):
-            option_lines.append(
-                "Option %s: %.0f deg / %s stalls" % (
-                    index + 1,
-                    option["angle"],
-                    option["stall_count"],
-                )
-            )
-        option_summary = "\n".join(option_lines)
-        if option_summary:
-            option_summary = "\n\nThree aisle skeletons tested:\n" + option_summary
+    auto_best = False
+    if len(sites) > 1:
+        answer = rs.MessageBox(
+            "%s sites selected.\n\n"
+            "Yes = automatically draw the highest-stall option for each site\n"
+            "No  = choose the aisle orientation separately for each site" % len(sites),
+            4 | 32,  # Yes/No + Question
+            "Parking Layout",
+        )
+        # 6 = Yes, 7 = No
+        auto_best = (answer == 6)
 
-        rs.MessageBox(
-            "Stalls: %s (%s on the perimeter)\n"
-            "Parking: %s degree %s bays\n"
-            "Aisle orientation: %.0f degrees\n"
-            "Street frontage length: %.0f ft\n"
-            "Accessible stalls required: %s including %s van%s" % (
+    results = []
+    for site in sites:
+        # Isolate selection so street-edge picking targets this boundary.
+        try:
+            rs.UnselectAllObjects()
+            rs.SelectObject(site["id"])
+        except Exception:
+            pass
+
+        street_edge = pick_street_edge(
+            site["id"], site["polygon"], site["z"], site_label=site["label"],
+        )
+        if not street_edge:
+            results.append({
+                "label": site["label"],
+                "ok": False,
+                "message": "Street frontage not selected — skipped.",
+            })
+            continue
+
+        layout, error = draw_layout(
+            site["id"],
+            street_edge,
+            setback,
+            site_label=site["label"],
+            auto_best=auto_best,
+        )
+        if error or not layout:
+            results.append({
+                "label": site["label"],
+                "ok": False,
+                "message": error or "No layout.",
+            })
+            continue
+
+        results.append({
+            "label": site["label"],
+            "ok": True,
+            "layout": layout,
+            "street_edge": street_edge,
+        })
+
+    try:
+        rs.UnselectAllObjects()
+    except Exception:
+        pass
+
+    if not results:
+        return
+
+    lines = []
+    total_stalls = 0
+    for result in results:
+        if not result["ok"]:
+            lines.append("%s: %s" % (result["label"], result["message"]))
+            continue
+        layout = result["layout"]
+        street_edge = result["street_edge"]
+        total_stalls += layout["stall_count"]
+        lines.append(
+            "%s: %s stalls (%s perimeter), %.0f deg aisles, street %.0f ft, ADA %s/%s" % (
+                result["label"],
                 layout["stall_count"],
                 layout["perimeter_stalls"],
-                layout["park_angle"],
-                layout["flow"],
                 layout["angle"],
                 street_edge["length"],
                 layout["ada"]["accessible"],
                 layout["ada"]["van"],
-                option_summary,
-            ),
-            64,
-            "Parking Layout",
+            )
         )
+
+    ok_count = sum(1 for result in results if result["ok"])
+    header = "Designed %s of %s site(s). Combined stalls: %s\n\n" % (
+        ok_count, len(sites), total_stalls,
+    )
+    rs.MessageBox(header + "\n".join(lines), 64, "Parking Layout")
 
 
 if __name__ == "__main__":

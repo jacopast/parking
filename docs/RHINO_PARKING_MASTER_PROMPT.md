@@ -25,7 +25,8 @@ exactly. Prefer Rhino `rhinoscriptsyntax` + pure-Python geometry (no Grasshopper
 required). Deliver:
 
 - `parking_core.py`  : shared geometry engine (pure Python except optional helpers)
-- `parking_layout.py`: Rhino RunPythonScript UX (pick site, pick street edge, setback)
+- `parking_layout.py`: Rhino RunPythonScript UX (pick one or more sites;
+  each site gets its own street edge + independent layout; shared setback)
 - optional feasibility panel may exist, but surface layout is primary
 
 Units: FEET throughout.
@@ -36,14 +37,17 @@ Units: FEET throughout.
 ═══════════════════════════════════════════════════════════════════════════════
 
 User flow in Rhino:
-1. Pick a CLOSED available-area curve (site boundary).
-2. Pick ONE EXISTING EDGE of that curve as street frontage.
+1. Pick ONE OR MORE CLOSED available-area curves (multi-select / preselect OK).
+   Each selected curve is a separate site designed independently.
+2. Ask for setback from property line (default 5 ft, min 0) — shared across sites.
+3. If multiple sites: Yes = auto-best orientation per site; No = ListBox per site.
+4. For EACH site, pick ONE EXISTING EDGE of that curve as street frontage.
    - Do NOT ask the user to draw a new line.
    - Highlight temporary segments of existing edges for selection.
-3. Ask for setback from property line (default 5 ft, min 0).
-4. Generate layout curves in layers. NO model text labels on geometry.
-5. MessageBox summary: stall count, perimeter stalls, park angle/flow,
-   aisle orientation, street length, ADA counts, and the three option scores.
+5. Generate layout curves in layers, grouped per site
+   (`Parking Layout — Site N`). NO model text labels on geometry.
+6. Combined MessageBox summary per site: stall count, perimeter stalls,
+   aisle orientation, street length, ADA counts.
 
 Layers (Parking Layout):
 - Available Area
