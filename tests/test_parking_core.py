@@ -34,8 +34,8 @@ class BayIslandReferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(horizontal["run_count"], 4)
-        self.assertEqual(horizontal["stall_count"], 166)
-        self.assertEqual(horizontal["perimeter_stalls"], 80)
+        self.assertEqual(horizontal["stall_count"], 162)
+        self.assertEqual(horizontal["perimeter_stalls"], 76)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
             86,
@@ -75,6 +75,51 @@ class BayIslandReferenceTests(unittest.TestCase):
                 core.RING_WIDTH,
                 delta=0.1,
             )
+
+    def test_universal_ring_has_constant_width_and_driveable_centerline(self):
+        parcels = [
+            [(0, 0), (300, 0), (300, 200), (0, 200)],
+            REFERENCE_SITE,
+            [(0, 0), (180, 0), (360, 160), (0, 420)],
+            [(0, 0), (240, 0), (400, 180), (0, 500)],
+            [(0, 0), (300, 0), (360, 180), (250, 350), (0, 300)],
+        ]
+        for parcel in parcels:
+            sides = (
+                (-1, 1)
+                if core.acute_vertices(parcel, core.MIN_DRIVE_CORNER_DEG)
+                else (1,)
+            )
+            for side in sides:
+                outer, inner = core.ring_band_points(
+                    parcel,
+                    0.0,
+                    5.0,
+                    5.0 + core.RING_WIDTH,
+                    chamfer_side=side,
+                )
+                self.assertIsNotNone(outer)
+                self.assertIsNotNone(inner)
+                self.assertTrue(core.ring_drive_is_acceptable(outer, inner))
+
+                outer_xy = core.as_xy_polygon(outer)
+                inner_xy = core.as_xy_polygon(inner)
+                centerline = core.offset_polygon_edges(
+                    outer_xy,
+                    [core.RING_WIDTH * 0.5] * len(outer_xy),
+                )
+                self.assertFalse(core.drive_path_has_sharp_turn(centerline))
+                for x, y in inner_xy:
+                    self.assertAlmostEqual(
+                        core.distance_to_polygon(outer_xy, x, y),
+                        core.RING_WIDTH,
+                        delta=0.1,
+                    )
+
+        # A nominally square loop can still be undriveable if consecutive
+        # corners are too close to fit two R15 tangencies.
+        short_loop = [(0, 0), (40, 0), (40, 40), (0, 40)]
+        self.assertFalse(core.ring_drive_is_acceptable(short_loop))
 
 
 if __name__ == "__main__":

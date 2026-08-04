@@ -176,8 +176,11 @@ The packer follows the same order as a manual parking study:
 1. Fix the site boundary and street frontage.
 2. Establish the **site-following perimeter circulation ring first**. Acute
    tips are chamfered asymmetrically so one new corner is 90° and the other
-   is obtuse. Both mirrored chamfers are developed and the higher-capacity
-   completed layout wins; the straight ring remains 24 ft wide.
+   is obtuse. The inner curb is built first and offset outward exactly 24 ft,
+   avoiding the false wide wedge produced by independently chamfered curbs.
+   Both mirrored chamfers are developed; candidates are rejected if the
+   actual drive centerline has a sub-90° corner or cannot fit adjacent R15
+   tangencies. The higher-capacity valid layout wins.
 3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
 4. Apply a **directional 30 ft envelope** perpendicular to each candidate aisle (18 ft stall + half of the 24 ft aisle). Do not shorten the aisle direction by 30 ft.
 5. Build exactly **three aisle-centerline options** through that domain: street-perpendicular, street-parallel, and dominant-edge aligned.

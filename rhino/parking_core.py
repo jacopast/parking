@@ -350,13 +350,49 @@ def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG,
 
 
 def ring_drive_is_acceptable(ring_outer_poly, ring_inner_poly=None):
-    """Circulation may be obtuse or square; acute aisle corners are rejected."""
+    """Validate the path a driver follows, not just the two curb polygons.
+
+    The centreline must have no acute corner, and every edge must be long
+    enough to seat the requested R15 curb-return tangencies at both ends.
+    This prevents two individually-valid curb offsets from forming a short
+    V-shaped compound turn that a car cannot actually negotiate.
+    """
     if not ring_outer_poly:
         return False
     if drive_path_has_sharp_turn(ring_outer_poly):
         return False
     if ring_inner_poly and drive_path_has_sharp_turn(ring_inner_poly):
         return False
+    outer = as_xy_polygon(ring_outer_poly)
+    centerline = offset_polygon_edges(
+        outer, [RING_WIDTH * 0.5] * len(outer),
+    )
+    if not centerline or len(centerline) < 3:
+        return False
+    if drive_path_has_sharp_turn(centerline):
+        return False
+
+    # A fillet of radius R consumes R/tan(interior/2) from each adjacent
+    # straight. Two consecutive turns must fit on their shared edge.
+    count = len(centerline)
+    tangencies = []
+    for index in range(count):
+        angle = interior_angle_deg(centerline, index)
+        if angle < MIN_DRIVE_CORNER_DEG - 0.5:
+            return False
+        if angle >= 175.0:
+            tangencies.append(0.0)
+            continue
+        half = math.radians(angle * 0.5)
+        tangent = RING_CORNER_RADIUS / max(math.tan(half), 1e-6)
+        tangencies.append(tangent)
+    for index in range(count):
+        ax, ay = centerline[index]
+        bx, by = centerline[(index + 1) % count]
+        length = math.hypot(bx - ax, by - ay)
+        required = tangencies[index] + tangencies[(index + 1) % count]
+        if length + 0.01 < required:
+            return False
     return True
 
 
@@ -2575,6 +2611,11 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
     span_u = max_u - min_u
     span_v = max_v - min_v
+    chamfer_sides = (
+        (-1, 1)
+        if acute_vertices(polygon, MIN_DRIVE_CORNER_DEG)
+        else (1,)
+    )
 
     for variant in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
@@ -2585,7 +2626,7 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
         # An acute tip has two valid asymmetric chamfers. One makes the
         # previous side square, the other makes the next side square. Develop
         # both complete layouts and keep the one with more final stalls.
-        for chamfer_side in (-1, 1):
+        for chamfer_side in chamfer_sides:
             outer_poly, inner_poly = ring_band_points(
                 polygon, z, ring_outer, ring_outer + RING_WIDTH,
                 edge_outer=variant["edge_outer"],
@@ -2711,29 +2752,49 @@ def ring_band_points(polygon, z, outer_distance, inner_distance,
                      edge_outer=None, chamfer_side=1):
     """Return the ring drive as (outer, inner) closed point lists.
 
-    Acute tips are chamfered so the drive never asks for a sub-90 turn, while
-    still following the site instead of collapsing to a tiny rectangle.
-    When edge_outer is given, each edge is offset by its own distance.
+    Build/chamfer the INNER curb (parking core) first, then offset it OUTWARD
+    exactly 24 ft. This preserves a usable chamfer face on the driver's inside
+    turn and spends the naturally wider acute-tip pocket outside the aisle,
+    instead of shrinking the parking core. Both derived curbs remain within
+    the independently computed raw outer limit.
     """
     if edge_outer:
-        outer = offset_polygon_edges(polygon, edge_outer)
+        raw_outer = offset_polygon_edges(polygon, edge_outer)
         inner = offset_polygon_edges(
             polygon, [distance + RING_WIDTH for distance in edge_outer],
         )
     else:
-        outer = offset_polygon(polygon, outer_distance)
+        raw_outer = offset_polygon(polygon, outer_distance)
         inner = offset_polygon(polygon, inner_distance)
-    if not outer or not inner:
+    if not raw_outer or not inner:
         return None, None
 
-    outer = chamfer_acute_corners(
-        outer, right_angle_side=chamfer_side,
-    )
     inner = chamfer_acute_corners(
         inner, right_angle_side=chamfer_side,
     )
-    if len(outer) < 3 or len(inner) < 3:
+    outer = offset_polygon_edges(
+        inner, [-RING_WIDTH] * len(inner),
+    )
+    if not outer or len(outer) < 3 or len(inner) < 3:
         return None, None
+
+    # The outward construction must not escape the usable-site outer limit.
+    # Check vertices and edge midpoints so concave parcels cannot bridge an
+    # exterior notch.
+    samples = list(outer)
+    samples.extend([
+        (
+            0.5 * (outer[index][0] + outer[(index + 1) % len(outer)][0]),
+            0.5 * (outer[index][1] + outer[(index + 1) % len(outer)][1]),
+        )
+        for index in range(len(outer))
+    ])
+    for x, y in samples:
+        if (
+            not point_inside(raw_outer, x, y)
+            and distance_to_polygon(raw_outer, x, y) > 0.1
+        ):
+            return None, None
 
     # Packing uses the chamfered polygons. Filleting is applied when curbs are
     # drawn so the core is not eaten by R15 arcs at every corner.

@@ -112,8 +112,14 @@ STEP B — Circulation ring FIRST (site-following)
   - At an acute tip, prefer an ASYMMETRIC chamfer: one new drive corner is
     exactly 90° and the other is obtuse. Evaluate the two mirrored chamfers
     and keep the completed layout with more valid stalls.
-  - The straight ring width stays 24 ft. The open corner junction is naturally
-    wider; do not over-cut it and lose stalls merely to create extra pavement.
+  - Build the chamfered INNER ring / parking core first, then offset it
+    OUTWARD exactly 24 ft to create the outer curb. Do not chamfer both curbs
+    independently: that creates a false 40–50 ft wedge at acute tips.
+  - Validate the actual 12 ft-offset DRIVE CENTRELINE:
+      * no interior corner below 90°
+      * each straight is long enough for the R15 tangencies at both ends
+    Reject a candidate that fails either test, even if both curb polygons
+    separately report legal angles.
   - Obtuse corners stay. Never collapse irregular sites to a tiny ortho
     rectangle just to force square turns.
   - Prefer site-following offset ring. Orthogonal racetrack is FALLBACK only
@@ -237,7 +243,8 @@ R3. No stalls in acute tips / unreachable tip dead zones beyond the
 R4. No stalls blocking street entry/exit throats.
 R5. Drive aisle corners may be obtuse or 90°; acute (<90°) drive corners
     are forbidden. Prefer one square + one obtuse chamfer corner, test both
-    mirrored sides, and do not over-cut the already-wider corner junction.
+    mirrored sides. Derive the outer curb 24 ft from the inner curb and test
+    the actual drive centreline plus R15 tangent fit.
 R6. Every interior bay aisle must connect to the perimeter ring.
 R7. Terminal islands at BOTH ends of every parking row; max 10 stalls
     between islands.
