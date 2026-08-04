@@ -13,12 +13,14 @@ sys.path.insert(0, CORE_DIR)
 sys.modules.pop("parking_core", None)
 import parking_core as core  # noqa: E402
 
-# Site traced from the manual drawing (feet, origin = bottom-left corner).
+# Site measured from the vector reference PDF (feet, origin = bottom-left).
+# Keep this as the regression parcel: the target has four horizontal,
+# double-loaded bay islands when the 0 degree option is selected.
 SITE = [
     (0.0, 0.0),
-    (182.0, 0.0),
-    (303.0, 197.0),
-    (0.0, 425.0),
+    (173.0, 0.0),
+    (290.0, 188.0),
+    (0.0, 407.0),
 ]
 STREET_INDEX = 0  # bottom edge
 SETBACK = 5.0

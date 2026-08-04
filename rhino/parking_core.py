@@ -1699,7 +1699,11 @@ def _build_bay_island(core_polygon, drive_polygon, basis, geometry, center_v,
             if span[1] - span[0] < TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS:
                 continue
             spans[sign] = span
-        if not spans:
+        # Interior islands are double-loaded by definition.  Accepting one
+        # surviving side here recreates the old aisle-centred edge rows: the
+        # first and last "islands" become single rows instead of the paired
+        # 36 ft bays shown in the manual layout.
+        if len(spans) != 2:
             continue
 
         roles = module_column_roles(spans)
