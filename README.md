@@ -13,6 +13,8 @@ The immediate goal is to help a design team answer early site-planning questions
 
 ```text
 README.md
+docs/
+  RHINO_PARKING_MASTER_PROMPT.md
 plugin/
   RhinoPluginParking/
     RhinoPluginParking.csproj
@@ -21,9 +23,12 @@ plugin/
     ParkingCommands.cs
     EmbeddedPythonRunner.cs
 rhino/
+  parking_core.py
   parking_feasibility_panel.py
   parking_layout.py
 ```
+
+To recreate or continue the surface layout toolkit from scratch in a new AI chat, use the master prompt in [`docs/RHINO_PARKING_MASTER_PROMPT.md`](docs/RHINO_PARKING_MASTER_PROMPT.md).
 
 ## Install in Rhino 8
 
