@@ -230,7 +230,7 @@ def draw_layout(boundary_id, street_edge, setback):
         if object_id:
             created.append(object_id)
 
-    for island in layout.get("islands", []):
+    for island in core.rounded_layout_islands(layout, z):
         object_id = add_polyline(island, LAYERS["islands"])
         if object_id:
             created.append(object_id)

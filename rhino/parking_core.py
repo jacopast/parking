@@ -64,6 +64,9 @@ MIN_DRIVE_CORNER_DEG = 90.0
 TERMINAL_ISLAND_COLUMNS = 1
 # Maximum consecutive stalls between landscape islands in a run.
 MAX_STALLS_BETWEEN_ISLANDS = 10
+# Manual drawing standard for terminal islands and curb returns.
+CURB_FILLET_RADIUS = 5.0
+FILLET_ARC_SEGMENTS = 8
 
 AISLE_WIDTHS = {
     (90, "two-way"): 24.0,
@@ -2452,6 +2455,111 @@ def _closed_xyz(points_xy, z):
     return pts
 
 
+def fillet_closed_polygon(points, z=0.0, radius=CURB_FILLET_RADIUS,
+                          arc_segments=FILLET_ARC_SEGMENTS):
+    """Approximate a constant-radius fillet at each convex polygon corner.
+
+    The requested radius is 5 ft. It is locally reduced only when adjacent
+    edges are too short (for example, a 9 ft-wide terminal island cannot
+    physically contain two full R5 tangencies).
+    """
+    poly = as_xy_polygon(points)
+    if len(poly) > 1 and math.hypot(
+        poly[0][0] - poly[-1][0], poly[0][1] - poly[-1][1],
+    ) < 1e-6:
+        poly = poly[:-1]
+    if len(poly) < 3 or radius <= 0.0:
+        return _closed_xyz(poly, z)
+
+    orientation = 1.0 if signed_area(poly) >= 0.0 else -1.0
+    result = []
+    count = len(poly)
+
+    for index in range(count):
+        prev = poly[(index - 1) % count]
+        curr = poly[index]
+        nxt = poly[(index + 1) % count]
+        to_prev = (prev[0] - curr[0], prev[1] - curr[1])
+        to_next = (nxt[0] - curr[0], nxt[1] - curr[1])
+        len_prev = math.hypot(to_prev[0], to_prev[1])
+        len_next = math.hypot(to_next[0], to_next[1])
+        angle = interior_angle_deg(poly, index)
+
+        # Concave / nearly straight vertices are kept sharp; a curb fillet
+        # here would extend outside its landscape region.
+        if (
+            len_prev < 1e-6 or len_next < 1e-6
+            or angle <= 5.0 or angle >= 175.0
+        ):
+            result.append((curr[0], curr[1], z))
+            continue
+
+        ux0, uy0 = to_prev[0] / len_prev, to_prev[1] / len_prev
+        ux1, uy1 = to_next[0] / len_next, to_next[1] / len_next
+        half = math.radians(angle * 0.5)
+        tan_half = math.tan(half)
+        sin_half = math.sin(half)
+        if abs(tan_half) < 1e-6 or abs(sin_half) < 1e-6:
+            result.append((curr[0], curr[1], z))
+            continue
+
+        tangent = radius / tan_half
+        tangent = min(tangent, len_prev * 0.5, len_next * 0.5)
+        effective_radius = tangent * tan_half
+        if effective_radius < 0.25:
+            result.append((curr[0], curr[1], z))
+            continue
+
+        p0 = (curr[0] + ux0 * tangent, curr[1] + uy0 * tangent)
+        p1 = (curr[0] + ux1 * tangent, curr[1] + uy1 * tangent)
+        bis_x, bis_y = ux0 + ux1, uy0 + uy1
+        bis_len = math.hypot(bis_x, bis_y)
+        if bis_len < 1e-6:
+            result.append((curr[0], curr[1], z))
+            continue
+        center_dist = effective_radius / sin_half
+        center = (
+            curr[0] + bis_x / bis_len * center_dist,
+            curr[1] + bis_y / bis_len * center_dist,
+        )
+
+        start = math.atan2(p0[1] - center[1], p0[0] - center[0])
+        end = math.atan2(p1[1] - center[1], p1[0] - center[0])
+        if orientation > 0.0:
+            while end <= start:
+                end += 2.0 * math.pi
+        else:
+            while end >= start:
+                end -= 2.0 * math.pi
+        sweep = end - start
+        steps = max(2, int(math.ceil(
+            abs(sweep) / (0.5 * math.pi) * arc_segments,
+        )))
+        for step in range(steps + 1):
+            angle_at = start + sweep * step / float(steps)
+            result.append((
+                center[0] + effective_radius * math.cos(angle_at),
+                center[1] + effective_radius * math.sin(angle_at),
+                z,
+            ))
+
+    if result and (
+        abs(result[0][0] - result[-1][0]) > 1e-6
+        or abs(result[0][1] - result[-1][1]) > 1e-6
+    ):
+        result.append(result[0])
+    return result
+
+
+def rounded_layout_islands(layout, z, radius=CURB_FILLET_RADIUS):
+    rounded = []
+    for island in layout.get("islands", []):
+        curve = fillet_closed_polygon(island, z, radius)
+        if curve:
+            rounded.append(curve)
+    return rounded
+
+
 def _point_in_any(x, y, polys):
     for poly in polys:
         if len(poly) >= 3 and point_inside(poly, x, y):
@@ -2658,24 +2766,28 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
 
     setback_poly = offset_polygon(site_polygon, max(setback, 0.0))
     if setback_poly:
-        curbs.extend(split_closed_curb_at_street(setback_poly, z, street_edge))
+        rounded = fillet_closed_polygon(setback_poly, z)
+        rounded_xy = as_xy_polygon(rounded[:-1]) if rounded else setback_poly
+        curbs.extend(split_closed_curb_at_street(rounded_xy, z, street_edge))
 
     outer, inner = layout_ring_polylines(layout, site_polygon, z)
     if outer:
         outer_xy = as_xy_polygon(outer)
         # Ring outer is the curb between perimeter field and the drive loop.
-        curbs.extend(split_closed_curb_at_street(outer_xy, z, street_edge))
+        rounded = fillet_closed_polygon(outer_xy, z)
+        rounded_xy = as_xy_polygon(rounded[:-1]) if rounded else outer_xy
+        curbs.extend(split_closed_curb_at_street(rounded_xy, z, street_edge))
     if inner:
-        inner_closed = _closed_xyz(as_xy_polygon(inner), z)
+        inner_closed = fillet_closed_polygon(inner, z)
         if inner_closed:
             curbs.append(inner_closed)
 
     curbs.extend(stall_back_curbs(layout.get("stalls", []), site_polygon, z))
-    for island in layout.get("islands", []):
-        closed = _closed_xyz(as_xy_polygon(island), z)
-        if closed:
-            curbs.append(closed)
-    curbs.extend(acute_corner_pocket_curbs(site_polygon, z))
+    curbs.extend(rounded_layout_islands(layout, z))
+    for pocket in acute_corner_pocket_curbs(site_polygon, z):
+        rounded = fillet_closed_polygon(pocket, z)
+        if rounded:
+            curbs.append(rounded)
 
     # Drop degenerate runs.
     cleaned = []

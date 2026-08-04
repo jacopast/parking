@@ -155,6 +155,7 @@ Accessible stall counts come from the [2010 ADA Standards, Table 208.2](https://
 | Stall width | 9 ft |
 | Stall stripe length | 18 ft |
 | Ring drive | 24 ft |
+| Curb / terminal-island fillet | 5 ft nominal (locally limited by short edges) |
 | Efficiency target | 330 square feet per stall or better |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
