@@ -126,6 +126,15 @@ STEP B — Circulation ring FIRST (site-following)
     neighbouring offset lines to rebuild the vertices.
   - Ring drive band width = 24 ft.
   - Offset polygon inward; CHAMFER only corners with interior angle < 90°.
+  - VALIDITY GATE on every offset (bisector or per-edge):
+      * area sign matches the parent
+      * no self-intersection
+      * vertices / edge midpoints stay inside the parent (inward)
+      * abs(area) is meaningful (> ~1 sf)
+    On failure: fall back to grid erosion (raster cells with clearance ≥
+    offset distance, extract connected components). Multi-lobe cores are a
+    valid result — never invent a flipped courtyard. If no core fits but
+    perimeter stalls do, emit a perimeter-only layout.
   - At an acute tip, prefer an ASYMMETRIC chamfer: one new drive corner is
     exactly 90° and the other is obtuse. Evaluate the two mirrored chamfers
     and keep the completed layout with more valid stalls.
@@ -146,12 +155,11 @@ STEP C — Parking core
   - Core = actual chamfered INNER ring polygon (not a scalar setback alone).
   - All interior aisle/module work clips to this polygon.
 
-STEP D — Exactly THREE aisle-orientation options
-  Build and fully develop these three (dedupe mod 180°):
-  1. Street-perpendicular
-  2. Street-parallel
-  3. Dominant non-street site-edge aligned (longest remaining edge)
-  Compare all three completed options; pick the best.
+STEP D — Aisle-orientation options (search more, present three)
+  Seed directions: street-perpendicular, street-parallel, dominant edges.
+  Also coarse-sweep every 15° by projected bay length and keep the best
+  slots (up to MAX_ORIENTATIONS). Fully develop each; present the top THREE
+  completed options in the Rhino ListBox.
 
 STEP D.5 — Entrance alignment (absorbed "spine aisle" idea)
   - Project the entrance point(s) inward and add grid phases that seat a bay

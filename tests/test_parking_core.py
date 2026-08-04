@@ -33,16 +33,22 @@ class BayIslandReferenceTests(unittest.TestCase):
             key=lambda option: abs(core.angle_key(option["angle"])),
         )
 
-        self.assertEqual(horizontal["run_count"], 4)
-        self.assertEqual(horizontal["stall_count"], 162)
+        self.assertEqual(horizontal["run_count"], 5)
+        self.assertEqual(horizontal["stall_count"], 166)
         self.assertEqual(horizontal["perimeter_stalls"], 76)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
-            86,
+            90,
         )
-        self.assertTrue(
-            all(len(run["rows"]) == 2 for run in horizontal["skeleton_runs"])
-        )
+        double_loaded = [
+            run for run in horizontal["skeleton_runs"] if len(run["rows"]) == 2
+        ]
+        single_loaded = [
+            run for run in horizontal["skeleton_runs"] if len(run["rows"]) == 1
+        ]
+        self.assertEqual(len(double_loaded), 4)
+        self.assertEqual(len(single_loaded), 1)
+        self.assertTrue(all(len(run["rows"]) == 2 for run in double_loaded))
         # Tip dead-zone landscape sits outside the ring, not in the aisle.
         outer = core.as_xy_polygon(horizontal["ring_outer_poly"])
         pockets = core.tip_pocket_islands(REFERENCE_SITE, horizontal, 0.0)
@@ -140,6 +146,59 @@ class BayIslandReferenceTests(unittest.TestCase):
         # Tip pocket + end-caps/islands are non-drivable; aisle is residual.
         self.assertIsNotNone(land["moving_hint"])
         self.assertEqual(land["moving_hint"]["nominal_width"], core.RING_WIDTH)
+
+
+class GeometryFailureRegressionTests(unittest.TestCase):
+    """Cases from multi-geometry agent reviews (offset / multi-span / U-shape)."""
+
+    U_SHAPE = [
+        (0, 0), (300, 0), (300, 340), (260, 340),
+        (260, 60), (40, 60), (40, 340), (0, 340),
+    ]
+    THIN_NECK_L = [
+        (0, 0), (300, 0), (300, 50), (50, 50), (50, 340), (0, 340),
+    ]
+    ACUTE_WEDGE = [(0, 0), (400, 0), (0, 60)]
+
+    def test_offset_rejects_flipped_u_shape_core(self):
+        # Deep offset used to flip the U and invent a courtyard core.
+        self.assertIsNone(core.offset_polygon(self.U_SHAPE, 47.0))
+        shallow = core.offset_polygon(self.U_SHAPE, 5.0)
+        self.assertIsNotNone(shallow)
+        self.assertTrue(core.offset_result_is_valid(self.U_SHAPE, shallow, 5.0))
+        self.assertGreater(core.signed_area(self.U_SHAPE) * core.signed_area(shallow), 0)
+
+    def test_offset_rejects_impossible_acute_wedge(self):
+        self.assertIsNone(core.offset_polygon(self.ACUTE_WEDGE, 47.0))
+
+    def test_all_true_spans_keeps_every_lobe(self):
+        flags = [False, True, True, False, True, True, True, False, True]
+        self.assertEqual(core.all_true_spans(flags, 2), [(1, 3), (4, 7)])
+        self.assertEqual(core.all_true_spans(flags, 1)[-1], (8, 9))
+
+    def test_u_shape_layout_does_not_invent_courtyard_stalls(self):
+        street = core.street_edge_from_index(self.U_SHAPE, 0)
+        layout = core.best_layout(
+            self.U_SHAPE, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        if layout is None:
+            return
+        # No stall centroid may sit in the open courtyard (40..260, 60..340)
+        # which is outside the U parcel.
+        for stall in layout["stalls"]:
+            cx = sum(p[0] for p in stall) / 4.0
+            cy = sum(p[1] for p in stall) / 4.0
+            self.assertTrue(
+                core.point_inside(self.U_SHAPE, cx, cy),
+                msg="stall escaped the U parcel at (%.1f, %.1f)" % (cx, cy),
+            )
+        failures = core.validate_layout(self.U_SHAPE, layout)
+        self.assertFalse(
+            any("flipped" in f or "escapes" in f for f in failures),
+            msg=str(failures),
+        )
 
 
 if __name__ == "__main__":
