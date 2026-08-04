@@ -365,9 +365,10 @@ def main():
             continue
         sites.append({
             "id": boundary_id,
-            "polygon": polygon,
+            "polygon": polygon,  # already simplified for curve / dense polylines
             "z": z,
             "label": "Site %s" % (index + 1),
+            "vertex_count": len(polygon),
         })
 
     if not sites:

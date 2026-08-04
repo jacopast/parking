@@ -195,6 +195,21 @@ class GeometryFailureRegressionTests(unittest.TestCase):
     def test_offset_rejects_impossible_acute_wedge(self):
         self.assertIsNone(core.offset_polygon(self.ACUTE_WEDGE, 47.0))
 
+    def test_simplify_caps_dense_curve_boundaries(self):
+        import math
+        n = 400
+        circle = [
+            (150 + 140 * math.cos(2 * math.pi * i / n),
+             150 + 140 * math.sin(2 * math.pi * i / n))
+            for i in range(n)
+        ]
+        simplified = core.simplify_closed_polygon(circle)
+        self.assertLessEqual(len(simplified), core.MAX_BOUNDARY_VERTICES)
+        self.assertGreaterEqual(len(simplified), 3)
+        ratio = abs(core.signed_area(simplified) / core.signed_area(circle))
+        self.assertGreater(ratio, 0.95)
+        self.assertLess(ratio, 1.05)
+
     def test_all_true_spans_keeps_every_lobe(self):
         flags = [False, True, True, False, True, True, True, False, True]
         self.assertEqual(core.all_true_spans(flags, 2), [(1, 3), (4, 7)])

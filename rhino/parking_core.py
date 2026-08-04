@@ -106,6 +106,11 @@ V_PHASE_STEPS = 5
 U_PHASE_STEPS = 4
 RING_SHIFT_STEPS = 3
 MAX_ORIENTATIONS = 8
+# Dense curve / densified-polyline boundaries explode O(n²) offset and
+# O(n·cells) erosion cost. Cap the working site polygon so a curved parcel
+# finishes in seconds instead of appearing hung.
+MAX_BOUNDARY_VERTICES = 48
+CURVE_DIVIDE_COUNT = 96
 
 
 def module_geometry(park_angle, flow, stall_width=STALL_WIDTH):
@@ -162,12 +167,25 @@ def as_tuple(point):
 
 
 def boundary_polygon(curve_id, rs):
-    """Return the boundary as a flat list of 2D points plus its elevation."""
+    """Return the boundary as a flat list of 2D points plus its elevation.
+
+    Smooth curves and densified polylines are simplified to
+    ``MAX_BOUNDARY_VERTICES`` so the solver stays interactive.
+    """
     points = None
     if rs.IsPolyline(curve_id):
         points = rs.PolylineVertices(curve_id)
     if not points:
-        points = rs.DivideCurve(curve_id, 160, False)
+        # Sample the curve, then simplify — do not keep every DivideCurve knot.
+        count = CURVE_DIVIDE_COUNT
+        try:
+            length = rs.CurveLength(curve_id)
+            if length and length > 0:
+                # Roughly one sample every 8–12 ft, clamped.
+                count = int(max(24, min(CURVE_DIVIDE_COUNT, length / 10.0)))
+        except Exception:
+            pass
+        points = rs.DivideCurve(curve_id, count, False)
     if not points:
         return None, 0.0
 
@@ -180,7 +198,116 @@ def boundary_polygon(curve_id, rs):
 
     if len(polygon) < 3:
         return None, z
-    return polygon, z
+    return simplify_closed_polygon(polygon), z
+
+
+def polygon_bbox_diagonal(polygon):
+    xs = [p[0] for p in polygon]
+    ys = [p[1] for p in polygon]
+    return math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+
+
+def _perpendicular_distance(point, start, end):
+    ax, ay = start
+    bx, by = end
+    px, py = point
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-18:
+        return math.hypot(px - ax, py - ay)
+    t = ((px - ax) * dx + (py - ay) * dy) / length_sq
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+
+def _douglas_peucker(points, epsilon):
+    """Simplify an open polyline. ``points`` must not repeat the close vertex."""
+    if len(points) < 3:
+        return list(points)
+    start = points[0]
+    end = points[-1]
+    max_dist = -1.0
+    max_index = 0
+    for index in range(1, len(points) - 1):
+        dist = _perpendicular_distance(points[index], start, end)
+        if dist > max_dist:
+            max_dist = dist
+            max_index = index
+    if max_dist > epsilon:
+        left = _douglas_peucker(points[: max_index + 1], epsilon)
+        right = _douglas_peucker(points[max_index:], epsilon)
+        return left[:-1] + right
+    return [start, end]
+
+
+def simplify_closed_polygon(polygon, max_vertices=MAX_BOUNDARY_VERTICES):
+    """Decimate a closed ring for solver performance while keeping shape.
+
+    Uses Douglas-Peucker with a binary-searched tolerance, then uniform
+    thinning if still over the cap (very wiggly parcels).
+    """
+    poly = as_xy_polygon(polygon)
+    if len(poly) > 1 and (
+        abs(poly[0][0] - poly[-1][0]) < 1e-9
+        and abs(poly[0][1] - poly[-1][1]) < 1e-9
+    ):
+        poly = poly[:-1]
+    if len(poly) <= max_vertices:
+        return poly
+
+    diagonal = polygon_bbox_diagonal(poly) or 1.0
+    # Closed ring: rotate so the farthest vertex from centroid is an endpoint
+    # candidate, then DP the open chain and re-close.
+    cx = sum(p[0] for p in poly) / float(len(poly))
+    cy = sum(p[1] for p in poly) / float(len(poly))
+    anchor = max(
+        range(len(poly)),
+        key=lambda i: (poly[i][0] - cx) ** 2 + (poly[i][1] - cy) ** 2,
+    )
+    rotated = poly[anchor:] + poly[:anchor]
+    chain = rotated + [rotated[0]]
+
+    lo, hi = 0.05, max(1.0, diagonal * 0.08)
+    best = None
+    for _ in range(18):
+        mid = 0.5 * (lo + hi)
+        simplified = _douglas_peucker(chain, mid)
+        if simplified and simplified[0] == simplified[-1]:
+            simplified = simplified[:-1]
+        if len(simplified) < 3:
+            hi = mid
+            continue
+        if len(simplified) > max_vertices:
+            lo = mid
+        else:
+            best = simplified
+            hi = mid
+    if best is None:
+        best = _douglas_peucker(chain, hi)
+        if best and best[0] == best[-1]:
+            best = best[:-1]
+
+    if best is None or len(best) < 3:
+        # Uniform stride fallback.
+        step = int(math.ceil(len(poly) / float(max_vertices)))
+        best = poly[::step]
+        if len(best) < 3:
+            best = poly[:max_vertices]
+
+    if len(best) > max_vertices:
+        step = int(math.ceil(len(best) / float(max_vertices)))
+        best = best[::step]
+        if abs(best[0][0] - best[-1][0]) < 1e-9 and abs(best[0][1] - best[-1][1]) < 1e-9:
+            best = best[:-1]
+        while len(best) > max_vertices:
+            best = best[::2]
+            if len(best) < 3:
+                break
+
+    # Keep orientation of the source ring.
+    if signed_area(poly) * signed_area(best) < 0:
+        best = list(reversed(best))
+    return best
 
 
 def polygon_centroid(polygon):
