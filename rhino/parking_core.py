@@ -66,6 +66,10 @@ TERMINAL_ISLAND_COLUMNS = 1
 MAX_STALLS_BETWEEN_ISLANDS = 10
 # Manual drawing standard for terminal islands and curb returns.
 CURB_FILLET_RADIUS = 5.0
+# Two-way 24 ft ring corners need a real turning radius. R5 island noses are
+# fine at stall ends, but a passenger car circulating the ring cannot clear a
+# sharp 90 deg curb. Prefer ~15 ft on the drive loop itself.
+RING_CORNER_RADIUS = 15.0
 # Bay islands are drawn with a generous end return, like the manual plan:
 # a 36 ft back-to-back island reads as a capsule, and an uneven nose
 # tapers instead of showing a raw orthogonal step.
@@ -292,13 +296,16 @@ def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG, max_pass
             if d_prev < 2.0 or d_next < 2.0:
                 continue
 
-            # Cut far enough to blunt the tip, but never more than half an edge.
-            # Deeper than a token chamfer so the empty tip matches manual layouts.
+            # Blunt tips deep enough for a two-way turn. Packing still uses the
+            # chamfered polygon (fillets are curb-only), so we can cut a real
+            # face without collapsing the core with R15 arcs.
             angle = interior_angle_deg(poly, index)
-            target = max(RING_WIDTH, STALL_STRIPE * 0.75)
+            target = max(RING_WIDTH * 1.5, RING_CORNER_RADIUS * 1.5)
             if angle < 60.0:
-                target = max(target, RING_WIDTH * 1.25)
-            cut = min(d_prev, d_next, target, min(d_prev, d_next) * 0.5)
+                target = max(target, RING_WIDTH * 2.5)
+            elif angle < 75.0:
+                target = max(target, RING_WIDTH * 2.0)
+            cut = min(d_prev, d_next, target, min(d_prev, d_next) * 0.7)
             if cut < 1.0:
                 new_poly.append(curr)
                 continue
@@ -1667,7 +1674,9 @@ def _row_fit_flags(core_polygon, drive_polygon, basis, geometry,
         if ok and site_polygon:
             # R3: an acute tip is a dead zone, interior rows included.
             cx, cy = to_world(basis, 0.5 * (u0 + u1), 0.5 * (sv0 + sv1))
-            if near_acute_corner(cx, cy, site_polygon):
+            if near_acute_corner(
+                cx, cy, site_polygon, ring_outer_poly=drive_polygon,
+            ):
                 ok = False
         flags.append(ok)
     return flags
@@ -2679,6 +2688,8 @@ def ring_band_points(polygon, z, outer_distance, inner_distance,
     if len(outer) < 3 or len(inner) < 3:
         return None, None
 
+    # Packing uses the chamfered polygons. Filleting is applied when curbs are
+    # drawn so the core is not eaten by R15 arcs at every corner.
     outer_points = [(x, y, z) for x, y in outer]
     inner_points = [(x, y, z) for x, y in inner]
     return outer_points, inner_points
@@ -2911,57 +2922,50 @@ def rounded_bay_envelopes(layout, z, radius=BAY_FILLET_RADIUS):
 
 
 def tip_pocket_islands(site_polygon, layout, z, radius=CURB_FILLET_RADIUS * 1.6):
-    """Small landscape islands in the leftover pocket at an acute tip.
+    """Landscape the unreachable tip outside the chamfered ring.
 
-    Cars cannot use the wedge behind a chamfered ring, so the manual plan
-    fills it with planting rather than leaving raw asphalt.
+    The dead zone between an acute site corner and the outer ring curb is not
+    driveable. Build the island from the site tip to the ring's chamfer face so
+    it meets the curb cleanly instead of floating a circle in the aisle.
     """
-    inner = layout.get("ring_inner_poly")
-    if not inner:
+    outer = layout.get("ring_outer_poly")
+    if not outer:
         return []
-    inner_xy = as_xy_polygon(inner)
-    if len(inner_xy) < 3:
+    outer_xy = as_xy_polygon(outer)
+    if len(outer_xy) < 3:
         return []
 
     islands = []
-    for _index, angle, (vx, vy) in acute_vertices(site_polygon, MIN_DRIVE_CORNER_DEG):
-        # Walk in from the tip along the bisector to the core, then sit the
-        # island just inside it.
-        cx, cy = polygon_centroid(inner_xy)
-        dx, dy = cx - vx, cy - vy
-        length = math.hypot(dx, dy)
-        if length < 1e-6:
+    for _index, _angle, (vx, vy) in acute_vertices(site_polygon, MIN_DRIVE_CORNER_DEG):
+        # The chamfer face is the outer-ring edge closest to the tip.
+        best = None
+        count = len(outer_xy)
+        for index in range(count):
+            ax, ay = outer_xy[index]
+            bx, by = outer_xy[(index + 1) % count]
+            dist = distance_to_segment(vx, vy, ax, ay, bx, by)
+            length = math.hypot(bx - ax, by - ay)
+            if length < RING_CORNER_RADIUS:
+                continue
+            if best is None or dist < best[0]:
+                best = (dist, (ax, ay), (bx, by))
+        if best is None:
             continue
-        dx, dy = dx / length, dy / length
-
-        anchor = None
-        step = 2.0
-        travelled = 0.0
-        while travelled <= length:
-            px, py = vx + dx * travelled, vy + dy * travelled
-            if point_inside(inner_xy, px, py):
-                anchor = (px + dx * STALL_STRIPE, py + dy * STALL_STRIPE)
-                break
-            travelled += step
-        if anchor is None:
+        _dist, a, b = best
+        # The nearest outer-ring edge to an acute tip is the chamfer face,
+        # even when the tip setback is deep on a narrow wedge.
+        if _dist > max(tip_clearance_depth(_angle), RING_WIDTH * 5.0):
             continue
-        if not point_inside(inner_xy, anchor[0], anchor[1]):
+        shape = [(vx, vy), a, b]
+        if signed_area(shape) == 0.0:
             continue
-
-        half = STALL_WIDTH
-        shape = [
-            (anchor[0] - dy * half, anchor[1] + dx * half),
-            (anchor[0] + dx * half * 1.2, anchor[1] + dy * half * 1.2),
-            (anchor[0] + dy * half, anchor[1] - dx * half),
-            (anchor[0] - dx * half * 0.8, anchor[1] - dy * half * 0.8),
-        ]
-        if not all(point_inside(inner_xy, px, py) for px, py in shape):
-            continue
-        occupied = list(layout.get("stalls") or []) + list(layout.get("islands") or [])
-        if any(convex_overlap(shape, _poly_xy(other)) for other in occupied):
+        # Keep the pocket outside the drive — reject if its centroid is inside.
+        cx = (vx + a[0] + b[0]) / 3.0
+        cy = (vy + a[1] + b[1]) / 3.0
+        if point_inside(outer_xy, cx, cy):
             continue
         curve = fillet_closed_polygon(shape, z, radius)
-        if curve:
+        if curve and len(curve) >= 4:
             islands.append(curve)
     return islands
 
@@ -3183,26 +3187,53 @@ def build_curb_polylines(site_polygon, z, layout, setback, street_edge=None):
     if setback_poly:
         rounded = fillet_closed_polygon(setback_poly, z)
         rounded_xy = as_xy_polygon(rounded[:-1]) if rounded else setback_poly
-        curbs.extend(split_closed_curb_at_street(rounded_xy, z, street_edge))
+        tip_gaps = tip_keepout_triangles(
+            site_polygon,
+            ring_outer_poly=layout.get("ring_outer_poly"),
+        )
+        if tip_gaps:
+            # Leave the setback curb open through acute tips — the tip pocket
+            # island owns that landscape, and drawing both stacks ghost lines.
+            runs = []
+            count = len(rounded_xy)
+            current = []
+            for index in range(count):
+                ax, ay = rounded_xy[index]
+                bx, by = rounded_xy[(index + 1) % count]
+                mid = (0.5 * (ax + bx), 0.5 * (ay + by))
+                in_tip = any(point_inside(tri, mid[0], mid[1]) for tri in tip_gaps)
+                if in_tip or _segment_near_street_gap(ax, ay, bx, by, street_edge):
+                    if len(current) >= 2:
+                        runs.append(current)
+                    current = []
+                    continue
+                if not current:
+                    current.append((ax, ay, z))
+                current.append((bx, by, z))
+            if len(current) >= 2:
+                runs.append(current)
+            curbs.extend(runs)
+        else:
+            curbs.extend(split_closed_curb_at_street(rounded_xy, z, street_edge))
 
     outer, inner = layout_ring_polylines(layout, site_polygon, z)
     if outer:
+        # Fillet the drive loop at a two-way turning radius. Do not also emit
+        # the sharp chamfered polyline — that stacked ghost corners under arcs.
         outer_xy = as_xy_polygon(outer)
-        # Ring outer is the curb between perimeter field and the drive loop.
-        rounded = fillet_closed_polygon(outer_xy, z)
+        rounded = fillet_closed_polygon(outer_xy, z, RING_CORNER_RADIUS)
         rounded_xy = as_xy_polygon(rounded[:-1]) if rounded else outer_xy
         curbs.extend(split_closed_curb_at_street(rounded_xy, z, street_edge))
     if inner:
-        inner_closed = fillet_closed_polygon(inner, z)
-        if inner_closed:
-            curbs.append(inner_closed)
+        inner_xy = as_xy_polygon(inner)
+        rounded = fillet_closed_polygon(inner_xy, z, RING_CORNER_RADIUS)
+        if rounded:
+            curbs.append(rounded)
 
     curbs.extend(stall_back_curbs(layout.get("stalls", []), site_polygon, z))
     curbs.extend(rounded_layout_islands(layout, z))
-    for pocket in acute_corner_pocket_curbs(site_polygon, z):
-        rounded = fillet_closed_polygon(pocket, z)
-        if rounded:
-            curbs.append(rounded)
+    # Tip dead zones are drawn as tip_pocket_islands; skip the old square
+    # keep-out markers that stacked on the same corner.
 
     # Drop degenerate runs.
     cleaned = []

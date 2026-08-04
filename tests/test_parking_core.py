@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 import unittest
@@ -33,14 +34,31 @@ class BayIslandReferenceTests(unittest.TestCase):
         )
 
         self.assertEqual(horizontal["run_count"], 4)
-        self.assertEqual(horizontal["stall_count"], 164)
-        self.assertEqual(horizontal["perimeter_stalls"], 78)
+        self.assertEqual(horizontal["stall_count"], 159)
+        self.assertEqual(horizontal["perimeter_stalls"], 73)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
             86,
         )
         self.assertTrue(
             all(len(run["rows"]) == 2 for run in horizontal["skeleton_runs"])
+        )
+        # Tip dead-zone landscape sits outside the ring, not in the aisle.
+        outer = core.as_xy_polygon(horizontal["ring_outer_poly"])
+        pockets = core.tip_pocket_islands(REFERENCE_SITE, horizontal, 0.0)
+        self.assertGreaterEqual(len(pockets), 1)
+        xs = [point[0] for point in pockets[0]]
+        ys = [point[1] for point in pockets[0]]
+        center = (sum(xs) / len(xs), sum(ys) / len(ys))
+        self.assertFalse(core.point_inside(outer, center[0], center[1]))
+        self.assertLess(
+            math.hypot(center[0] - 0.0, center[1] - 407.0),
+            120.0,
+        )
+        # Ring corners stay at least square after tip chamfer.
+        self.assertGreaterEqual(
+            core.polygon_min_interior_angle(outer),
+            core.MIN_DRIVE_CORNER_DEG - 0.5,
         )
 
 

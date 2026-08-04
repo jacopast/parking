@@ -63,10 +63,8 @@ def run(polygon=None, setback=SETBACK, street_index=STREET_INDEX, out="out.svg",
     if layout is None:
         print("NO LAYOUT")
     else:
-        outer, inner = core.layout_ring_polylines(layout, poly3, 0.0)
-        for band in (outer, inner):
-            if band:
-                parts.append(polyline(band, COLORS["circulation"], 1.0))
+        # Ring faces come from build_curb_polylines already chamfered/filleted.
+        # Drawing the raw ring on top created ghost sharp corners under arcs.
         for curb in core.build_curb_polylines(poly3, 0.0, layout, setback, street_edge):
             if curb and len(curb) > 1:
                 closed = (abs(curb[0][0] - curb[-1][0]) < 1e-6
@@ -75,7 +73,7 @@ def run(polygon=None, setback=SETBACK, street_index=STREET_INDEX, out="out.svg",
         for env in core.rounded_bay_envelopes(layout, 0.0):
             parts.append(polyline(env, COLORS["circulation"], 0.9))
         for pocket in core.tip_pocket_islands(poly3, layout, 0.0):
-            parts.append(polyline(pocket, COLORS["circulation"], 0.9))
+            parts.append(polyline(pocket, COLORS["islands"], 0.9))
         for island in core.rounded_layout_islands(layout, 0.0):
             parts.append(polyline(island, COLORS["islands"], 0.9))
         for stall in layout["stalls"]:

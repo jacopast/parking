@@ -120,20 +120,12 @@ def pick_street_edge(boundary_id, polygon, z):
 
 
 def draw_ring(polygon, z, layout):
-    created = []
-    outer, inner = core.layout_ring_polylines(layout, polygon, z)
+    """Ring faces are emitted through build_curb_polylines (already filleted).
 
-    for band in (outer, inner):
-        if not band:
-            continue
-        valid = [point for point in band if core.point_inside(polygon, point[0], point[1])]
-        if len(valid) < 3:
-            continue
-        object_id = add_polyline(valid, LAYERS["circulation"])
-        if object_id:
-            created.append(object_id)
-
-    return created
+    Keeping a second sharp polyline here stacked under the curb arcs and made
+    24 ft two-way corners look impassable.
+    """
+    return []
 
 
 def draw_street_edge(street_edge, z):
