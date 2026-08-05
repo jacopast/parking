@@ -490,10 +490,12 @@ def main():
         street_edge = result["street_edge"]
         total_stalls += layout["stall_count"]
         lines.append(
-            "%s: %s stalls (%s perimeter), %.0f deg aisles, street %.0f ft, ADA %s/%s" % (
+            "%s: %s stalls (%s perimeter), %s interior field(s), "
+            "%.0f deg aisles, street %.0f ft, ADA %s/%s" % (
                 result["label"],
                 layout["stall_count"],
                 layout["perimeter_stalls"],
+                layout.get("interior_field_count", 0),
                 layout["angle"],
                 street_edge["length"],
                 layout["ada"]["accessible"],

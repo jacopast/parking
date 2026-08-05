@@ -133,7 +133,12 @@ those greens and the stall faces — not a separately authored aisle curve.
 
 ## Design basis
 
-The hard part is geometry, not the dimension table. Published module widths define the lattice period (how wide a bay is). The layout itself comes from searching aisle orientation and lattice phase until the most stalls fit and still connect to the ring drive.
+The hard part is geometry, not the dimension table. Published module widths
+define the lattice period. The irregular inner core is treated as a container:
+the solver fits one clean rectangular parking grid, or composes two to three
+ordered rectangular grids for broad L/U/multi-lobe sites. It does not force
+interior rows to trace every curve or notch. Remaining irregular areas become
+landscape or pavement.
 
 Module widths in `rhino/parking_core.py` reproduce [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), adapted from ULI and NPA, *The Dimensions of Parking*.
 

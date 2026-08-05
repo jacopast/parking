@@ -155,7 +155,13 @@ STEP B — Circulation ring FIRST (site-following)
 
 STEP C — Parking core
   - Core = actual chamfered INNER ring polygon (not a scalar setback alone).
-  - All interior aisle/module work clips to this polygon.
+  - The irregular core is only a CONTAINER. Do not make the interior parking
+    field imitate every curve, notch, taper, or acute side.
+  - Fit one clean orthogonal rectangle first. In broad L / U / multi-lobe
+    cores, compose up to THREE non-overlapping clean rectangles, separated by
+    a 24 ft drive/cross-aisle gap.
+  - Every rectangle must be wholly inside the core; reject rectangles that
+    bridge a concave notch even when all four corners happen to be inside.
 
 STEP D — Aisle-orientation options (search more, present three)
   Seed directions: street-perpendicular, street-parallel, dominant edges.
@@ -172,7 +178,18 @@ STEP D.5 — Entrance alignment (absorbed "spine aisle" idea)
     that can discard a higher-capacity street-parallel option. Keep all three
     orientations and let the score / user pick.
 
-STEP E — Bay islands BEFORE stalls (island-centred, NOT aisle-centred)
+STEP E — Ordered rectangular fields BEFORE bays
+  - For each orientation, grow rectangular field candidates from interior
+    sample centers.
+  - Snap field dimensions inward to 9 ft stall / 18 ft depth increments.
+  - Rank fully developed combinations by final valid stall count.
+  - Use one rectangle when that is best; use two or three only when secondary
+    lobes add valid parking without overlap.
+  - Curves and irregular leftovers outside the fields become landscape /
+    pavement. A lower count is acceptable when the alternative is malformed
+    geometry or inaccessible stalls.
+
+STEP F — Bay islands inside each field (island-centred, NOT aisle-centred)
   The drawn module is the 36 ft BACK-TO-BACK STALL ISLAND, exactly as it is
   drafted by hand. Its 24 ft aisles sit OUTSIDE it and are shared with the
   next island or with the perimeter ring. The lattice period is still
@@ -181,23 +198,18 @@ STEP E — Bay islands BEFORE stalls (island-centred, NOT aisle-centred)
   For a candidate direction (U along the island, V across it):
   - Island band = [center_v - 18, center_v + 18], lattice period 60 ft.
   - TWO REGIONS, not one:
-      park region  = chamfered INNER ring polygon (stalls may sit here)
+      park region  = one clean rectangular field (stalls may sit here)
       drive region = chamfered OUTER ring polygon (aisles may sit here)
     An outer bay is legally served by the ring drive, so it must NOT be
     required to find a second interior aisle inside the core.
 
-STEP F — Per-column, per-ROW fitting (this is what makes tapers work)
+STEP G — Per-column, per-ROW fitting inside each clean field
   - Walk the shared 9 ft column grid across the island band.
   - For each column test each row separately:
       stall cell [u, u+9] x 18 ft   inside PARK region, and
       aisle cell [u, u+9] x 24 ft   in front of it inside DRIVE region.
-  - Keep EVERY contiguous fitting span PER ROW that meets the minimum
-    column count (not only the longest). Pair overlapping opposite-side
-    spans into independent bay islands so U / L / notched parcels do not
-    drop a whole lobe on one band.
-  - DO NOT require one common rectangle across the whole 60 ft strip.
-    That is the bug that truncates every row to the narrowest scanline and
-    leaves tapered parcels half empty.
+  - The field itself is rectangular, so row ends stay ordered. Do not trim
+    individual rows into a jagged imitation of the parcel boundary.
   - After the double-loaded lattice, fill leftover v-strips ≥ 42 ft with
     single-loaded modules (18 + 24).
   - If a leftover strip cannot take another clean row, GROW the outer
@@ -210,7 +222,7 @@ STEP F — Per-column, per-ROW fitting (this is what makes tapers work)
     tapered site, and the island end steps/tapers with the parcel edge.
   - Minimum usable stall columns after end-caps: MIN_RUN_COLUMNS (3).
 
-STEP G — Roles / islands BEFORE filling stalls
+STEP H — Roles / islands BEFORE filling stalls
   Both rows share ONE absolute column grid:
   - First and last TERMINAL_ISLAND_COLUMNS columns of EACH row = terminal
     (end-cap) islands — each row caps at its own end.
@@ -221,7 +233,7 @@ STEP G — Roles / islands BEFORE filling stalls
   End-caps exist so cars can turn at the cross aisle. Never park into the tip
   of a row at the aisle intersection.
 
-STEP H — Populate stalls LAST
+STEP I — Populate stalls LAST
   - Stalls are struck from the aisle face back to the shared island spine.
   - Emit a closed BAY ENVELOPE per island (its stepped outline) and draw
     that, filleted at BAY_FILLET_RADIUS ≈ 9 ft. Do NOT draw raw aisle
@@ -233,7 +245,7 @@ STEP H — Populate stalls LAST
   - Interior of ring is NOT also single-loaded as a second perimeter ring
     (that wastes a module edge).
 
-STEP I — Tip dead zones / acute corners
+STEP J — Tip dead zones / acute corners
   - Site tips with interior angle ≤ 90° cannot host stalls.
   - Chamfer the RING at those tips; leave the region between tip and
     chamfered ring EMPTY (manual dead zone).
@@ -241,7 +253,7 @@ STEP I — Tip dead zones / acute corners
   - Stall ban threshold must MATCH ring chamfer threshold (both 90°).
     Never chamfer at 90° while banning stalls only below 80°.
 
-STEP J — Street access
+STEP K — Street access
   - Place entry/exit stations along street edge (e.g. 1/3 and 2/3; mid if short).
   - Driveway throats project STRAIGHT INWARD along the street inward normal
     onto the ring — NEVER to the nearest ring vertex (that creates diagonal
@@ -249,7 +261,7 @@ STEP J — Street access
   - No stalls in driveway clear zones (DRIVEWAY_CLEAR ≈ 28 ft).
   - Setback / outer-ring curbs are gapped at street curb cuts.
 
-STEP K — Finish curbs / islands with fillets
+STEP L — Finish curbs / islands with fillets
   - Nominal fillet radius = 5 ft on:
     terminal islands, interior islands, perimeter islands,
     setback curb, ring outer, ring inner, acute tip pockets.
@@ -258,7 +270,7 @@ STEP K — Finish curbs / islands with fillets
     cannot hold two full R5 tangencies; use max feasible ~R4.5).
   - Concave / nearly straight corners stay sharp.
 
-STEP L — Score and pick
+STEP M — Score and pick
   Rank completed options primarily by FINAL driveable stall count.
   Tie-breakers (secondary): connected run count, aisle length,
   street alignment, site-following ring preferred over ortho fallback.

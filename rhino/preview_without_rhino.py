@@ -35,6 +35,7 @@ COLORS = {
     "stalls": "#f5b301",
     "stall_fill": "#fff4cc",
     "moving": "#d9d9d9",
+    "field": "#377eb8",
 }
 
 
@@ -83,11 +84,15 @@ def run(polygon=None, setback=SETBACK, street_index=STREET_INDEX, out="out.svg",
                 0.7,
                 fill=COLORS["stall_fill"],
             ))
+        # Diagnostic only: clean rectangular interior field envelopes.
+        for field in layout.get("interior_fields") or []:
+            parts.append(polyline(field, COLORS["field"], 1.2, fill="none"))
         parts.append(polyline(polygon, COLORS["boundary"], 1.4, fill="none"))
 
-        print("%-22s stalls=%s perimeter=%s runs=%s angle=%.1f ring=%s non_drivable=%s" % (
+        print("%-22s stalls=%s perimeter=%s fields=%s runs=%s angle=%.1f ring=%s non_drivable=%s" % (
             title or out,
             layout["stall_count"], layout["perimeter_stalls"],
+            layout.get("interior_field_count", 0),
             layout.get("run_count"), layout["angle"], layout.get("ring_mode"),
             len(land["non_drivable"]),
         ))

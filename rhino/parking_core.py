@@ -1585,6 +1585,319 @@ def ortho_rect_candidates(polygon, basis, setback, stall_width):
     return unique
 
 
+MAX_INTERIOR_FIELDS = 3
+MAX_FIELD_CANDIDATES = 14
+FIELD_SEPARATION = RING_WIDTH
+MIN_INTERIOR_FIELD_U = STALL_WIDTH * (
+    TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
+)
+MIN_INTERIOR_FIELD_V = DOUBLE_LOADED_MODULE
+
+
+def rectangular_field_is_strictly_inside(polygon, basis, rect, margin=0.0):
+    """True when a whole orthogonal field rectangle stays inside the core.
+
+    Corner-only tests can bridge a concave notch. In addition to the usual
+    containment samples, reject any site edge that properly crosses a field
+    edge.
+    """
+    u0, u1, v0, v1 = rect
+    if not rectangle_inside_polygon(
+        polygon, basis, u0, u1, v0, v1, margin,
+    ):
+        return False
+
+    field = rect_polygon_2d(basis, u0, u1, v0, v1)
+    site = as_xy_polygon(polygon)
+    for field_index in range(4):
+        fa = field[field_index]
+        fb = field[(field_index + 1) % 4]
+        for site_index in range(len(site)):
+            sa = site[site_index]
+            sb = site[(site_index + 1) % len(site)]
+            if segments_intersect(fa, fb, sa, sb, endpoint_ok=False):
+                return False
+    return True
+
+
+def rectangular_field_candidates(polygon, basis, margin=0.0):
+    """Find clean rectangular parking fields inside an irregular core.
+
+    The intent is not to trace every bend of the parcel. We grow ordered
+    rectangles from a grid of interior centers, retain the strongest distinct
+    fields, and later combine up to three non-overlapping ones.
+    """
+    min_u, max_u, min_v, max_v = local_bounds(polygon, basis)
+    width = max_u - min_u
+    height = max_v - min_v
+    if width < MIN_INTERIOR_FIELD_U or height < MIN_INTERIOR_FIELD_V:
+        return []
+
+    raw = []
+    fitted = fitted_ortho_rect(polygon, basis, margin)
+    if fitted:
+        raw.append(fitted)
+
+    max_half_u = 0.5 * width
+    max_half_v = 0.5 * height
+    # More centers than fitted_ortho_rect: outer lobe centers are what let a
+    # U/L/notched parcel become two or three ordered fields.
+    fractions = (0.14, 0.26, 0.38, 0.50, 0.62, 0.74, 0.86)
+    for fu in fractions:
+        for fv in fractions:
+            cu = min_u + width * fu
+            cv = min_v + height * fv
+            x, y = to_world(basis, cu, cv)
+            if not has_clearance(polygon, x, y, margin):
+                continue
+            rect, _area = _parking_rect_from_center(
+                polygon, basis, cu, cv,
+                min_u, max_u, min_v, max_v, margin,
+            )
+            if rect:
+                raw.append(rect)
+
+    candidates = []
+    seen = set()
+    for rect in raw:
+        u0, u1, v0, v1 = rect
+        # Shrink to useful module increments. This produces deliberate field
+        # edges instead of arbitrary decimal remnants from binary search.
+        field_w = math.floor((u1 - u0) / STALL_WIDTH) * STALL_WIDTH
+        field_h = math.floor((v1 - v0) / STALL_STRIPE) * STALL_STRIPE
+        if field_w < MIN_INTERIOR_FIELD_U or field_h < MIN_INTERIOR_FIELD_V:
+            continue
+        cu = 0.5 * (u0 + u1)
+        cv = 0.5 * (v0 + v1)
+        clean = (
+            cu - 0.5 * field_w, cu + 0.5 * field_w,
+            cv - 0.5 * field_h, cv + 0.5 * field_h,
+        )
+        key = tuple(round(value, 1) for value in clean)
+        if key in seen:
+            continue
+        if not rectangular_field_is_strictly_inside(
+            polygon, basis, clean, margin,
+        ):
+            continue
+        seen.add(key)
+        candidates.append(clean)
+
+    candidates.sort(
+        key=lambda rect: (rect[1] - rect[0]) * (rect[3] - rect[2]),
+        reverse=True,
+    )
+
+    # Grow residual fields around the strongest primary rectangles. Cropping a
+    # valid rectangle remains valid and exposes secondary lobes that overlap
+    # the primary candidate before cropping (typical L / bent parcels).
+    expanded = list(candidates)
+    for primary in candidates[:4]:
+        pu0, pu1, pv0, pv1 = primary
+        for source in candidates:
+            su0, su1, sv0, sv1 = source
+            trials = (
+                (su0, min(su1, pu0 - FIELD_SEPARATION), sv0, sv1),
+                (max(su0, pu1 + FIELD_SEPARATION), su1, sv0, sv1),
+                (su0, su1, sv0, min(sv1, pv0 - FIELD_SEPARATION)),
+                (su0, su1, max(sv0, pv1 + FIELD_SEPARATION), sv1),
+            )
+            for trial in trials:
+                tu0, tu1, tv0, tv1 = trial
+                field_w = math.floor((tu1 - tu0) / STALL_WIDTH) * STALL_WIDTH
+                field_h = math.floor((tv1 - tv0) / STALL_STRIPE) * STALL_STRIPE
+                if (
+                    field_w < MIN_INTERIOR_FIELD_U
+                    or field_h < MIN_INTERIOR_FIELD_V
+                ):
+                    continue
+                clean = (
+                    tu0, tu0 + field_w,
+                    tv0, tv0 + field_h,
+                )
+                if rectangular_field_is_strictly_inside(
+                    polygon, basis, clean, margin,
+                ):
+                    expanded.append(clean)
+
+    unique = []
+    seen = set()
+    for rect in expanded:
+        key = tuple(round(value, 1) for value in rect)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(rect)
+    unique.sort(
+        key=lambda rect: (rect[1] - rect[0]) * (rect[3] - rect[2]),
+        reverse=True,
+    )
+    return unique[:MAX_FIELD_CANDIDATES]
+
+
+def _parking_rect_from_center(
+    polygon, basis, cu, cv, min_u, max_u, min_v, max_v, margin,
+):
+    """Largest useful parking rectangle at a center, including narrow lobes."""
+    available_half_u = min(cu - min_u, max_u - cu)
+    available_half_v = min(cv - min_v, max_v - cv)
+    if (
+        available_half_u * 2.0 < MIN_INTERIOR_FIELD_U
+        or available_half_v * 2.0 < MIN_INTERIOR_FIELD_V
+    ):
+        return None, 0.0
+
+    best = None
+    best_area = 0.0
+    for index in range(1, 18):
+        hu = available_half_u * index / 17.0
+        if 2.0 * hu < MIN_INTERIOR_FIELD_U:
+            continue
+        lo = 0.0
+        hi = available_half_v
+        fit_hv = None
+        for _ in range(16):
+            hv = 0.5 * (lo + hi)
+            if 2.0 * hv < MIN_INTERIOR_FIELD_V:
+                lo = hv
+                continue
+            rect = (cu - hu, cu + hu, cv - hv, cv + hv)
+            if rectangular_field_is_strictly_inside(
+                polygon, basis, rect, margin,
+            ):
+                fit_hv = hv
+                lo = hv
+            else:
+                hi = hv
+        if fit_hv is None:
+            continue
+        area = 4.0 * hu * fit_hv
+        if area > best_area:
+            best_area = area
+            best = (cu - hu, cu + hu, cv - fit_hv, cv + fit_hv)
+    return best, best_area
+
+
+def rectangular_fields_compatible(first, second, separation=FIELD_SEPARATION):
+    """Separate independently phased fields by one drive aisle."""
+    au0, au1, av0, av1 = first
+    bu0, bu1, bv0, bv1 = second
+    u_gap = max(bu0 - au1, au0 - bu1)
+    v_gap = max(bv0 - av1, av0 - bv1)
+    return u_gap >= separation - 0.01 or v_gap >= separation - 0.01
+
+
+def merge_rectangular_interiors(interiors, basis, geometry, z):
+    """Combine independently solved clean fields into one interior payload."""
+    if not interiors:
+        return None
+    merged = {
+        "stalls": [],
+        "aisles": [],
+        "bay_envelopes": [],
+        "islands": [],
+        "absorb_landscape": [],
+        "awkward_pad": 0.0,
+        "stall_count": 0,
+        "run_count": 0,
+        "connected_run_count": 0,
+        "aisle_length": 0.0,
+        "skeleton_runs": [],
+        "module_core": None,
+        "angle": basis["angle"],
+        "park_angle": geometry["park_angle"],
+        "flow": geometry["flow"],
+        "u_phase": 0.0,
+        "v_phase": 0.0,
+        "interior_fields": [],
+    }
+    for rect, interior in interiors:
+        for key in (
+            "stalls", "aisles", "bay_envelopes", "islands",
+            "absorb_landscape", "skeleton_runs",
+        ):
+            merged[key].extend(interior.get(key) or [])
+        merged["stall_count"] += interior.get("stall_count", 0)
+        merged["run_count"] += interior.get("run_count", 0)
+        merged["connected_run_count"] += interior.get("connected_run_count", 0)
+        merged["aisle_length"] += interior.get("aisle_length", 0.0)
+        merged["awkward_pad"] += interior.get("awkward_pad", 0.0)
+        merged["interior_fields"].append(
+            rect_world_polygon(basis, rect[0], rect[1], rect[2], rect[3], z)
+        )
+    return merged
+
+
+def layout_composed_rectangular_fields(
+    polygon, basis, z, geometry, drive_polygon=None,
+    site_polygon=None, entrance_points=None,
+):
+    """Solve an irregular core as one to three ordered rectangular grids."""
+    candidates = rectangular_field_candidates(polygon, basis, margin=0.0)
+    developed = []
+    for rect in candidates:
+        field_poly = rect_polygon_2d(
+            basis, rect[0], rect[1], rect[2], rect[3],
+        )
+        interior = layout_for_angle(
+            field_poly, basis, 0.0, z, geometry,
+            drive_polygon=drive_polygon or polygon,
+            site_polygon=site_polygon,
+            entrance_points=entrance_points,
+            compose_fields=False,
+        )
+        if not interior or interior.get("stall_count", 0) <= 0:
+            continue
+        developed.append((rect, interior))
+
+    if not developed:
+        return None
+    developed.sort(
+        key=lambda item: item[1].get("stall_count", 0),
+        reverse=True,
+    )
+    developed = developed[:MAX_FIELD_CANDIDATES]
+
+    best_combo = None
+    best_rank = None
+    count = len(developed)
+    # At most 14 + 91 + 364 combinations.
+    index_sets = [(i,) for i in range(count)]
+    for i in range(count):
+        for j in range(i + 1, count):
+            index_sets.append((i, j))
+            for k in range(j + 1, count):
+                index_sets.append((i, j, k))
+
+    for indices in index_sets:
+        selected = []
+        compatible = True
+        for index in indices:
+            rect, interior = developed[index]
+            if any(
+                not rectangular_fields_compatible(rect, other_rect)
+                for other_rect, _other in selected
+            ):
+                compatible = False
+                break
+            selected.append((rect, interior))
+        if not compatible:
+            continue
+        stalls = sum(item[1].get("stall_count", 0) for item in selected)
+        area = sum(
+            (item[0][1] - item[0][0]) * (item[0][3] - item[0][2])
+            for item in selected
+        )
+        rank = (stalls, len(selected), area)
+        if best_combo is None or rank > best_rank:
+            best_combo = selected
+            best_rank = rank
+
+    return merge_rectangular_interiors(
+        best_combo or [developed[0]], basis, geometry, z,
+    )
+
+
 def touches_ring(polygon, basis, u, v0, depth, clearance):
     for step in (0.0, 0.5, 1.0):
         x, y = to_world(basis, u, v0 + depth * step)
@@ -2560,10 +2873,21 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
 
 
 def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
-                     site_polygon=None, entrance_points=None):
+                     site_polygon=None, entrance_points=None,
+                     compose_fields=True):
     # The PDF workflow uses centerline -> full module envelope -> trim ->
     # stalls. Keep the old tile path only for diagonal emergency fallback.
     if geometry["park_angle"] == 90 and clearance <= 0.001:
+        if compose_fields:
+            composed = layout_composed_rectangular_fields(
+                polygon, basis, z, geometry,
+                drive_polygon=drive_polygon,
+                site_polygon=site_polygon,
+                entrance_points=entrance_points,
+            )
+            if composed:
+                return composed
+
         period = geometry["double_module"]
         steps = max(V_PHASE_STEPS, 12)
         phases = [period * step / float(steps) for step in range(steps)]
@@ -3009,6 +3333,8 @@ def compose_candidate(
         "bay_envelopes": interior.get("bay_envelopes", []) if interior else [],
         "islands": islands,
         "absorb_landscape": list(interior.get("absorb_landscape") or []) if interior else [],
+        "interior_fields": list(interior.get("interior_fields") or []) if interior else [],
+        "interior_field_count": len(interior.get("interior_fields") or []) if interior else 0,
         "awkward_pad": (interior.get("awkward_pad", 0.0) if interior else 0.0),
         "module_core": interior.get("module_core") if interior else None,
         "skeleton_runs": interior.get("skeleton_runs", []) if interior else [],
