@@ -612,7 +612,18 @@ def main():
         except Exception:
             pass
         clear_escape()
+        # A command-line prompt alone is easy to miss and reads as "the tool
+        # did nothing", so always confirm a cancel in a dialog too.
         rs.Prompt("Parking layout cancelled.")
+        rs.MessageBox("Parking layout cancelled.", 64, "Parking Layout")
+    except Exception:
+        import traceback
+        rs.Prompt("Parking layout failed.")
+        rs.MessageBox(
+            "Parking layout failed:\n\n%s" % traceback.format_exc()[-1200:],
+            16,
+            "Parking Layout",
+        )
 
 
 if __name__ == "__main__":
