@@ -333,6 +333,45 @@ class GeometryFailureRegressionTests(unittest.TestCase):
                 msg="mid-row island must stay a plain rectangle",
             )
 
+    def test_landscape_stays_inside_site_and_off_the_stalls(self):
+        """Tip pockets and setback strips must not cover parking or escape."""
+        street = core.street_edge_from_index(REFERENCE_SITE, 0)
+        layout = core.best_layout(
+            REFERENCE_SITE, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        horizontal = min(
+            core.option_layouts(layout),
+            key=lambda option: abs(core.angle_key(option["angle"])),
+        )
+        land = core.layout_land_use(
+            REFERENCE_SITE, horizontal, 5.0, street, 0.0,
+        )
+        self.assertGreater(len(land["non_drivable"]), 0)
+
+        stall_centers = []
+        for stall in land["standing"]:
+            points = core.as_xy_polygon(stall)
+            stall_centers.append((
+                sum(p[0] for p in points) / len(points),
+                sum(p[1] for p in points) / len(points),
+            ))
+
+        for region in land["non_drivable"]:
+            points = core.as_xy_polygon(region)
+            for x, y in points:
+                self.assertTrue(
+                    core.point_inside(REFERENCE_SITE, x, y)
+                    or core.distance_to_polygon(REFERENCE_SITE, x, y) <= 1.0,
+                    msg="landscape escaped the parcel at (%.1f, %.1f)" % (x, y),
+                )
+            for cx, cy in stall_centers:
+                self.assertFalse(
+                    core.point_inside(points, cx, cy),
+                    msg="landscape covers a stall at (%.1f, %.1f)" % (cx, cy),
+                )
+
     def test_all_true_spans_keeps_every_lobe(self):
         flags = [False, True, True, False, True, True, True, False, True]
         self.assertEqual(core.all_true_spans(flags, 2), [(1, 3), (4, 7)])

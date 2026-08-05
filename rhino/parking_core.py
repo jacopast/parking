@@ -5052,18 +5052,94 @@ def tip_pocket_islands(site_polygon, layout, z, radius=CURB_FILLET_RADIUS * 1.6)
         # even when the tip setback is deep on a narrow wedge.
         if _dist > max(tip_clearance_depth(_angle), RING_WIDTH * 5.0):
             continue
-        shape = [(vx, vy), a, b]
-        if signed_area(shape) == 0.0:
+        shape = _tip_pocket_shape(site_polygon, _index, a, b, layout)
+        if not shape or len(shape) < 3 or signed_area(shape) == 0.0:
             continue
         # Keep the pocket outside the drive — reject if its centroid is inside.
-        cx = (vx + a[0] + b[0]) / 3.0
-        cy = (vy + a[1] + b[1]) / 3.0
+        cx = sum(point[0] for point in shape) / float(len(shape))
+        cy = sum(point[1] for point in shape) / float(len(shape))
         if point_inside(outer_xy, cx, cy):
             continue
         curve = fillet_closed_polygon(shape, z, radius)
         if curve and len(curve) >= 4:
             islands.append(curve)
     return islands
+
+
+def _tip_pocket_shape(site_polygon, tip_index, face_a, face_b, layout):
+    """Dead-zone pocket bounded by the two site edges meeting at a tip.
+
+    Running straight from the tip to the ring corners cuts diagonally across
+    the setback and the perimeter stall row. Following the actual site edges
+    keeps the pocket inside the parcel and clear of parked cars.
+    """
+    count = len(site_polygon)
+    tip = site_polygon[tip_index]
+    prev_point = site_polygon[(tip_index - 1) % count]
+    next_point = site_polygon[(tip_index + 1) % count]
+
+    def unit_to(target):
+        dx = target[0] - tip[0]
+        dy = target[1] - tip[1]
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            return None, 0.0
+        return (dx / length, dy / length), length
+
+    prev_dir, prev_len = unit_to(prev_point)
+    next_dir, next_len = unit_to(next_point)
+    if prev_dir is None or next_dir is None:
+        return None
+
+    def reach(direction, face_point):
+        # How far along this site edge the ring face reaches.
+        dx = face_point[0] - tip[0]
+        dy = face_point[1] - tip[1]
+        return max(0.0, dx * direction[0] + dy * direction[1])
+
+    # Pair each ring-face endpoint with the site edge it sits closer to.
+    if (
+        distance_to_segment(face_a[0], face_a[1], tip[0], tip[1], prev_point[0], prev_point[1])
+        + distance_to_segment(face_b[0], face_b[1], tip[0], tip[1], next_point[0], next_point[1])
+    ) <= (
+        distance_to_segment(face_b[0], face_b[1], tip[0], tip[1], prev_point[0], prev_point[1])
+        + distance_to_segment(face_a[0], face_a[1], tip[0], tip[1], next_point[0], next_point[1])
+    ):
+        prev_face, next_face = face_a, face_b
+    else:
+        prev_face, next_face = face_b, face_a
+
+    prev_reach = min(reach(prev_dir, prev_face), prev_len)
+    next_reach = min(reach(next_dir, next_face), next_len)
+    if prev_reach < STALL_WIDTH or next_reach < STALL_WIDTH:
+        return None
+
+    stalls = [as_xy_polygon(stall) for stall in (layout.get("stalls") or [])]
+
+    def build(scale):
+        p1 = (
+            tip[0] + prev_dir[0] * prev_reach * scale,
+            tip[1] + prev_dir[1] * prev_reach * scale,
+        )
+        p2 = (
+            tip[0] + next_dir[0] * next_reach * scale,
+            tip[1] + next_dir[1] * next_reach * scale,
+        )
+        return [tip, p1, prev_face, next_face, p2]
+
+    # Pull the pocket back until no parked car sits inside it.
+    for scale in (1.0, 0.85, 0.7, 0.55, 0.4):
+        shape = build(scale)
+        clash = False
+        for stall in stalls:
+            cx = sum(p[0] for p in stall) / float(len(stall))
+            cy = sum(p[1] for p in stall) / float(len(stall))
+            if point_inside(shape, cx, cy):
+                clash = True
+                break
+        if not clash:
+            return shape
+    return None
 
 
 def rounded_layout_islands(layout, z, radius=CURB_FILLET_RADIUS):
@@ -5110,6 +5186,22 @@ def setback_landscape_polygons(site_polygon, setback, z=0.0, street_edge=None):
     street_index = street_edge.get("index") if street_edge else None
     strips = []
     count = len(site_polygon)
+
+    # At an acute tip, offsetting perpendicular to one edge crosses the other
+    # and lands outside the parcel. The validated inward offset already solves
+    # the corner, so use its vertices for the inner face when it lines up.
+    inner_ring = offset_polygon(as_xy_polygon(site_polygon), setback)
+    if not inner_ring or len(inner_ring) != count:
+        inner_ring = None
+
+    def inner_corner(index, fallback):
+        if inner_ring is None:
+            return fallback
+        x, y = inner_ring[index % count]
+        if not point_inside(site_polygon, x, y):
+            return fallback
+        return (x, y)
+
     for index in range(count):
         ax, ay = site_polygon[index][0], site_polygon[index][1]
         bx, by = site_polygon[(index + 1) % count][0], site_polygon[(index + 1) % count][1]
@@ -5148,9 +5240,14 @@ def setback_landscape_polygons(site_polygon, setback, z=0.0, street_edge=None):
                     strips.append(strip)
             continue
 
-        strip = _edge_strip_polygon(ax, ay, bx, by, nx, ny, setback, z)
-        if strip:
-            strips.append(strip)
+        near = inner_corner(index, (ax + nx * setback, ay + ny * setback))
+        far = inner_corner(index + 1, (bx + nx * setback, by + ny * setback))
+        strips.append([
+            (ax, ay, z),
+            (bx, by, z),
+            (far[0], far[1], z),
+            (near[0], near[1], z),
+        ])
     return strips
 
 

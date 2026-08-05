@@ -282,6 +282,14 @@ STEP H — Roles / islands BEFORE filling stalls
   - Clip leftover landscape bands to the core polygon. They are measured on
     the core bounding box, so a tapered parcel otherwise gets a green bar
     hanging outside the site.
+  - TIP POCKETS follow the two SITE EDGES that meet at the tip and close on the
+    ring chamfer face. Running straight from the tip to the ring corners cuts
+    diagonally across the setback and the perimeter stall row. Pull the pocket
+    back until no parked car sits inside it.
+  - SETBACK strips take their inner corners from the validated inward offset.
+    Offsetting perpendicular to one edge crosses the other at an acute tip and
+    lands outside the parcel.
+  - INVARIANT: no non-drivable region may leave the parcel or cover a stall.
 
 STEP I — Populate stalls LAST
   - Stalls are struck from the aisle face back to the shared island spine.
