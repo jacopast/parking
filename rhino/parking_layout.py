@@ -47,26 +47,35 @@ LAYERS = {
 _ACTIVE_CREATED = []
 
 
-def escape_requested(reset=False):
-    """Non-throwing Rhino ESC check, compatible with Rhino 7/8 signatures."""
+try:
+    import scriptcontext as _sc
+except Exception:
+    _sc = None
+
+
+def escape_requested():
+    """True only when the user actually pressed ESC.
+
+    ESC handling in Rhino Python lives on ``scriptcontext.escape_test`` — there
+    is no ``rs.EscapeTest``. The first argument is throw_exception; pass False
+    so this only reports state. Reset=False keeps the flag set so every
+    checkpoint still sees it until the command unwinds. Fail SAFE: if the API
+    is unavailable, never report a cancel (otherwise every run cancels itself).
+    """
+    if _sc is None:
+        return False
     try:
-        return bool(rs.EscapeTest(False, reset))
-    except TypeError:
-        try:
-            return bool(rs.EscapeTest(False))
-        except TypeError:
-            try:
-                return bool(rs.EscapeTest())
-            except Exception:
-                return True
+        return bool(_sc.escape_test(False, False))
     except Exception:
-        # EscapeTest may throw Rhino's cancellation exception on older builds.
-        return True
+        return False
 
 
 def clear_escape():
+    """Consume any stale ESC left in the buffer before a run starts."""
+    if _sc is None:
+        return
     try:
-        rs.EscapeTest(False, True)
+        _sc.escape_test(False, True)
     except Exception:
         pass
 
