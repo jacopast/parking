@@ -171,11 +171,30 @@ STEP C — Parking core
     boundary-following lattice when it wins by a wide margin, otherwise a
     curved or tapered parcel throws away usable parking.
 
-STEP D — Aisle-orientation options (search more, present three)
+STEP D — Aisle-orientation options (screen many, develop three)
   Seed directions: street-perpendicular, street-parallel, dominant edges.
   Also coarse-sweep every 15° by projected bay length and keep the best
-  slots (up to MAX_ORIENTATIONS). Fully develop each; present the top THREE
-  completed options in the Rhino ListBox.
+  slots (up to MAX_ORIENTATIONS).
+  SCREEN before developing: the ring does not depend on orientation, so score
+  each direction with one coarse lattice pass, then fully develop only the top
+  DEVELOPED_ORIENTATIONS that are at least ORIENTATION_SPREAD_DEG apart.
+  Developing every swept direction costs minutes on a large parcel, and
+  near-duplicate angles return effectively the same plan.
+  Present the completed options in the Rhino ListBox.
+
+  Performance rules that matter at scale (an 18-acre parcel went from ~11 min
+  to ~1 min by observing these):
+  - Solve each module band once as U intervals; never probe nine points per
+    stall column.
+  - Memoize polygon vertices in the parking frame, strip intervals, tip
+    keep-out zones, and grid erosion.
+  - Flood fill by scanlining the drive region per row, then subtracting each
+    obstacle over its own bounding box only.
+  - Check stall overlap with a spatial bucket grid, not every pair.
+  - Trim field candidates and lattice phase steps once the core exceeds
+    LARGE_CORE_AREA.
+  - Report progress through the ``progress`` callback so a long solve is not
+    a silent wait.
 
 STEP D.5 — Entrance alignment (absorbed "spine aisle" idea)
   - Project the entrance point(s) inward and add grid phases that seat a bay

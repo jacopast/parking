@@ -209,14 +209,17 @@ def choose_option(layout, site_label=None, auto_best=False):
     return options[0]
 
 
-def compute_layout(boundary_id, street_edge, setback):
+def compute_layout(boundary_id, street_edge, setback, progress=None):
     """Run the solver only — no Rhino prompts, no drawing."""
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
         return None, "Could not read the selected available area."
 
     access_points = core.access_points_on_street_edge(street_edge)
-    layout = core.best_layout(polygon, z, setback, access_points, street_edge=street_edge)
+    layout = core.best_layout(
+        polygon, z, setback, access_points,
+        street_edge=street_edge, progress=progress,
+    )
     if not layout:
         return None, "No parking bay fits inside the perimeter drive."
     return layout, None
@@ -404,16 +407,27 @@ def main():
         return
 
     # ── Phase 2: compute every site (no drawing yet) ──
-    rs.Prompt("Computing parking layouts…")
-    for job in ready:
+    total = len(ready)
+    for index, job in enumerate(ready, start=1):
         site = job["site"]
-        layout, error = compute_layout(site["id"], job["street_edge"], setback)
+        prefix = "Computing %s (%d of %d)" % (site["label"], index, total)
+
+        def report(message, prefix=prefix):
+            # Rhino only repaints the prompt line, so keep it short and live.
+            rs.Prompt("%s — %s…" % (prefix, message))
+
+        report("reading boundary")
+        layout, error = compute_layout(
+            site["id"], job["street_edge"], setback, progress=report,
+        )
         if error or not layout:
             job["ok"] = False
             job["message"] = error or "No layout."
             job["layout"] = None
+            rs.Prompt("%s — no layout" % prefix)
         else:
             job["layout"] = layout
+            rs.Prompt("%s — %d stalls" % (prefix, layout["stall_count"]))
 
     # ── Phase 3: orientation picks (only input that needs solve scores) ──
     if not auto_best:
@@ -435,7 +449,7 @@ def main():
                 )
 
     # ── Phase 4: draw everything ──
-    rs.Prompt("Drawing parking layouts…")
+    rs.Prompt("Drawing %d parking layout(s)…" % len(ready))
     setup_layers()
     results = []
     for job in jobs:
@@ -454,6 +468,7 @@ def main():
             })
             continue
 
+        rs.Prompt("Drawing %s…" % job["site"]["label"])
         layout, error = draw_layout_geometry(
             job["site"]["id"],
             job["street_edge"],

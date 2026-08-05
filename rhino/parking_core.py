@@ -106,6 +106,10 @@ V_PHASE_STEPS = 5
 U_PHASE_STEPS = 4
 RING_SHIFT_STEPS = 3
 MAX_ORIENTATIONS = 8
+# Directions that survive the cheap screen and get a full field / phase search.
+DEVELOPED_ORIENTATIONS = 3
+# Developed directions must differ by at least this much to be worth the cost.
+ORIENTATION_SPREAD_DEG = 10.0
 # Dense curve / densified-polyline boundaries explode O(n²) offset and
 # O(n·cells) erosion cost. Cap the working site polygon so a curved parcel
 # finishes in seconds instead of appearing hung.
@@ -833,28 +837,46 @@ def flood_fill_driveable(drive_polygon, seeds, cell=4.0, blocked=None):
         cols = max(1, int(math.ceil((max_x - min_x) / cell)))
         rows = max(1, int(math.ceil((max_y - min_y) / cell)))
 
-    def cell_center(col, row):
-        return (min_x + (col + 0.5) * cell, min_y + (row + 0.5) * cell)
-
-    def is_blocked(x, y):
-        if not blocked:
-            return False
-        for obstacle in blocked:
-            obs = as_xy_polygon(obstacle)
-            if len(obs) >= 3 and point_inside(obs, x, y):
-                if distance_to_polygon(obs, x, y) > 0.5:
-                    return True
-        return False
-
+    # Scanline the drive region once per row, then subtract obstacles by
+    # visiting only the cells each obstacle can cover. Testing every cell
+    # against every stall made this the slowest step on large sites.
     open_cells = set()
     for row in range(rows):
-        for col in range(cols):
-            x, y = cell_center(col, row)
-            if not point_inside(poly, x, y):
+        y = min_y + (row + 0.5) * cell
+        hits = []
+        for index in range(len(poly)):
+            ax, ay = poly[index]
+            bx, by = poly[(index + 1) % len(poly)]
+            if (ay > y) == (by > y):
                 continue
-            if is_blocked(x, y):
-                continue
-            open_cells.add((col, row))
+            hits.append(ax + (bx - ax) * (y - ay) / (by - ay))
+        hits.sort()
+        for pair in range(0, len(hits) - 1, 2):
+            left, right = hits[pair], hits[pair + 1]
+            col_start = max(0, int(math.ceil((left - min_x) / cell - 0.5)))
+            col_end = min(cols - 1, int((right - min_x) / cell - 0.5))
+            for col in range(col_start, col_end + 1):
+                open_cells.add((col, row))
+
+    for obstacle in blocked or []:
+        obs = as_xy_polygon(obstacle)
+        if len(obs) < 3:
+            continue
+        obs_xs = [p[0] for p in obs]
+        obs_ys = [p[1] for p in obs]
+        col_start = max(0, int((min(obs_xs) - min_x) / cell) - 1)
+        col_end = min(cols - 1, int((max(obs_xs) - min_x) / cell) + 1)
+        row_start = max(0, int((min(obs_ys) - min_y) / cell) - 1)
+        row_end = min(rows - 1, int((max(obs_ys) - min_y) / cell) + 1)
+        for row in range(row_start, row_end + 1):
+            y = min_y + (row + 0.5) * cell
+            for col in range(col_start, col_end + 1):
+                key = (col, row)
+                if key not in open_cells:
+                    continue
+                x = min_x + (col + 0.5) * cell
+                if point_inside(obs, x, y) and distance_to_polygon(obs, x, y) > 0.5:
+                    open_cells.discard(key)
 
     queue = []
     reached = set()
@@ -959,17 +981,38 @@ def validate_layout(site_polygon, layout, tol=0.5):
     stalls = layout.get("stalls") or []
     site = as_xy_polygon(site_polygon)
 
+    # Bucket by a stall-scale grid: comparing every pair is O(n^2) and became
+    # the slowest check once large sites produced thousands of stalls.
+    bucket_size = STALL_STRIPE * 2.0
+    buckets = {}
+    outlines = []
     for index, stall in enumerate(stalls):
         pts = [(p[0], p[1]) for p in stall]
+        outlines.append(pts)
         for x, y in pts:
             if not point_inside(site, x, y) and distance_to_polygon(site, x, y) > tol:
                 failures.append("stall %d escapes site" % index)
                 break
-        for other_index in range(index + 1, len(stalls)):
-            other = [(p[0], p[1]) for p in stalls[other_index]]
-            if convex_overlap(pts, other):
-                failures.append("stall %d overlaps stall %d" % (index, other_index))
-                break
+        cx = sum(p[0] for p in pts) / len(pts)
+        cy = sum(p[1] for p in pts) / len(pts)
+        buckets.setdefault(
+            (int(cx // bucket_size), int(cy // bucket_size)), [],
+        ).append(index)
+
+    for (bx, by), members in buckets.items():
+        neighbours = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                neighbours.extend(buckets.get((bx + dx, by + dy), ()))
+        for index in members:
+            for other_index in neighbours:
+                if other_index <= index:
+                    continue
+                if convex_overlap(outlines[index], outlines[other_index]):
+                    failures.append(
+                        "stall %d overlaps stall %d" % (index, other_index)
+                    )
+                    break
 
     ring_outer = layout.get("ring_outer_poly")
     if ring_outer and polygon_self_intersects(as_xy_polygon(ring_outer)):
@@ -1629,6 +1672,10 @@ def ortho_rect_candidates(polygon, basis, setback, stall_width):
 
 MAX_INTERIOR_FIELDS = 3
 MAX_FIELD_CANDIDATES = 14
+# Beyond roughly four acres of core, trim the candidate/phase search so a big
+# parcel does not spend minutes re-deriving nearly identical plans.
+LARGE_CORE_AREA = 175000.0
+LARGE_CORE_FIELD_CANDIDATES = 6
 FIELD_SEPARATION = RING_WIDTH
 MIN_INTERIOR_FIELD_U = STALL_WIDTH * (
     TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
@@ -1914,7 +1961,12 @@ def rectangular_field_candidates(polygon, basis, margin=0.0):
         key=lambda rect: (rect[1] - rect[0]) * (rect[3] - rect[2]),
         reverse=True,
     )
-    return unique[:MAX_FIELD_CANDIDATES]
+    # Every kept candidate costs a full phase search, so large cores (which are
+    # also the slow ones) keep a shorter list.
+    limit = MAX_FIELD_CANDIDATES
+    if width * height > LARGE_CORE_AREA:
+        limit = LARGE_CORE_FIELD_CANDIDATES
+    return unique[:limit]
 
 
 def rectangular_fields_compatible(first, second, separation=FIELD_SEPARATION):
@@ -2329,9 +2381,28 @@ def layout_for_phase(polygon, basis, clearance, z, geometry, u_phase, v_phase):
     }
 
 
+_LOCAL_POLYGON_CACHE = {}
+
+
+def local_polygon_points(polygon, basis):
+    """Polygon vertices in the parking frame, memoized per polygon/basis."""
+    key = (
+        id(polygon), len(polygon), polygon[0], polygon[-1],
+        round(basis["angle"], 4),
+        round(basis["origin"][0], 3), round(basis["origin"][1], 3),
+    )
+    cached = _LOCAL_POLYGON_CACHE.get(key)
+    if cached is None:
+        cached = [to_local(basis, p[0], p[1]) for p in as_xy_polygon(polygon)]
+        if len(_LOCAL_POLYGON_CACHE) > 512:
+            _LOCAL_POLYGON_CACHE.clear()
+        _LOCAL_POLYGON_CACHE[key] = cached
+    return cached
+
+
 def scanline_intervals(polygon, basis, v):
     """Intersect an infinite U-direction line with a polygon in parking UV."""
-    local = [to_local(basis, p[0], p[1]) for p in as_xy_polygon(polygon)]
+    local = local_polygon_points(polygon, basis)
     hits = []
     for index in range(len(local)):
         u0, v0 = local[index]
@@ -2377,7 +2448,7 @@ def strip_common_intervals(polygon, basis, v0, v1):
     artificial erosion along its aisle. Sampling every polygon vertex within
     the strip captures where tapered/concave boundaries change slope.
     """
-    local = [to_local(basis, p[0], p[1]) for p in as_xy_polygon(polygon)]
+    local = local_polygon_points(polygon, basis)
     samples = [v0, v1, 0.5 * (v0 + v1)]
     for _u, vertex_v in local:
         if v0 + 0.01 < vertex_v < v1 - 0.01:
@@ -2393,6 +2464,27 @@ def strip_common_intervals(polygon, basis, v0, v1):
         if not common:
             return []
     return common or []
+
+
+_STRIP_INTERVAL_CACHE = {}
+
+
+def _strip_intervals_cached(polygon, basis, v0, v1):
+    """strip_common_intervals memoized across phases and field candidates."""
+    if polygon is None:
+        return []
+    key = (
+        id(polygon), len(polygon), polygon[0], polygon[-1],
+        round(basis["angle"], 4),
+        round(v0, 3), round(v1, 3),
+    )
+    cached = _STRIP_INTERVAL_CACHE.get(key)
+    if cached is None:
+        cached = strip_common_intervals(polygon, basis, v0, v1)
+        if len(_STRIP_INTERVAL_CACHE) > 20000:
+            _STRIP_INTERVAL_CACHE.clear()
+        _STRIP_INTERVAL_CACHE[key] = cached
+    return cached
 
 
 def _cell_inside(region_polygon, basis, u0, u1, v0, v1):
@@ -2504,15 +2596,34 @@ def _row_fit_flags(core_polygon, drive_polygon, basis, geometry,
     pitch = geometry["stall_pitch"]
     sv0, sv1 = _row_v_range(geometry, center_v, sign)
     av0, av1 = _aisle_v_range(geometry, center_v, sign)
+
+    # Solve each band once as U intervals instead of probing nine points per
+    # column. On a large parcel the per-cell version dominated the whole solve.
+    stall_spans = _strip_intervals_cached(core_polygon, basis, sv0, sv1)
+    if not stall_spans:
+        return [False] * count
+    aisle_spans = _strip_intervals_cached(drive_polygon, basis, av0, av1)
+    if not aisle_spans:
+        return [False] * count
+
+    tips = None
+    if site_polygon:
+        tips = _tip_keepout_zones(site_polygon, ACUTE_KEEP_OUT, drive_polygon)
+        if not tips[0] and not tips[1]:
+            tips = None
+
+    def covered(spans, u0, u1):
+        for left, right in spans:
+            if left - 0.01 <= u0 and u1 <= right + 0.01:
+                return True
+        return False
+
     flags = []
     for index in range(count):
         u0 = u_start + index * pitch
         u1 = u0 + pitch
-        ok = (
-            _cell_inside(core_polygon, basis, u0, u1, sv0, sv1)
-            and _cell_inside(drive_polygon, basis, u0, u1, av0, av1)
-        )
-        if ok and site_polygon:
+        ok = covered(stall_spans, u0, u1) and covered(aisle_spans, u0, u1)
+        if ok and tips is not None:
             # R3: an acute tip is a dead zone, interior rows included.
             cx, cy = to_world(basis, 0.5 * (u0 + u1), 0.5 * (sv0 + sv1))
             if near_acute_corner(
@@ -3038,6 +3149,10 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
 
         period = geometry["double_module"]
         steps = max(V_PHASE_STEPS, 12)
+        bounds = uv_bounds or local_bounds(polygon, basis)
+        if (bounds[1] - bounds[0]) * (bounds[3] - bounds[2]) > LARGE_CORE_AREA:
+            # 60 ft period; 8 steps still resolves the lattice to 7.5 ft.
+            steps = 8
         phases = [period * step / float(steps) for step in range(steps)]
         phases.append(0.0)
         # Entrance alignment (absorbed from the "spine aisle" idea): add phases
@@ -3903,15 +4018,94 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     return best
 
 
-def _search_layouts(polygon, z, setback, access_points, stall_width, park_configs, street_edge=None):
-    """Compare three cleaned aisle skeleton options, then populate the winner."""
+def screen_orientations(polygon, z, setback, orientations, geometry,
+                        stall_width=STALL_WIDTH, street_edge=None,
+                        keep=DEVELOPED_ORIENTATIONS):
+    """Cheaply rank aisle directions before paying for full development.
+
+    Developing every swept direction on a large parcel costs minutes. The ring
+    does not depend on orientation, so one coarse lattice pass per direction is
+    enough to decide which few deserve the full field / phase search.
+    """
+    if len(orientations) <= keep:
+        return list(orientations)
+
+    variants = build_offset_variants(polygon, z, setback, stall_width, street_edge)
+    core_poly = None
+    drive_poly = None
+    for variant in variants:
+        outer, inner = ring_band_points(
+            polygon, z, variant["ring_outer"],
+            variant["ring_outer"] + RING_WIDTH,
+            edge_outer=variant["edge_outer"],
+        )
+        if outer and inner:
+            core_poly = as_xy_polygon(inner)
+            drive_poly = as_xy_polygon(outer)
+            break
+    if core_poly is None:
+        return list(orientations)[:keep]
+
+    origin = polygon_centroid(polygon)
+    period = geometry["double_module"]
+    scored = []
+    for angle in orientations:
+        basis = make_basis(origin, angle)
+        best_estimate = 0
+        for phase in (0.0, period * 0.5):
+            skeleton = build_module_skeleton_phase(
+                core_poly, basis, geometry, phase, drive_poly, polygon,
+            )
+            if skeleton and skeleton["stall_count"] > best_estimate:
+                best_estimate = skeleton["stall_count"]
+        scored.append((best_estimate, angle))
+
+    scored.sort(reverse=True)
+
+    # Spread the survivors out. Developing 0 deg and 1 deg separately costs a
+    # full search each and returns effectively the same plan.
+    selected = []
+    for _estimate, angle in scored:
+        if any(
+            min(
+                abs(angle_key(angle) - angle_key(chosen)),
+                180.0 - abs(angle_key(angle) - angle_key(chosen)),
+            ) < ORIENTATION_SPREAD_DEG
+            for chosen in selected
+        ):
+            continue
+        selected.append(angle)
+        if len(selected) >= keep:
+            break
+    if not selected:
+        selected = [angle for _estimate, angle in scored[:keep]]
+    return selected
+
+
+def _search_layouts(polygon, z, setback, access_points, stall_width,
+                    park_configs, street_edge=None, progress=None):
+    """Compare cleaned aisle skeleton options, then populate the winner."""
     origin = polygon_centroid(polygon)
     orientations = primary_skeleton_orientations(polygon, street_edge)
     geometries = [module_geometry(angle, flow, stall_width) for angle, flow in park_configs]
+
+    if geometries:
+        if progress:
+            progress("Screening %d aisle directions" % len(orientations))
+        orientations = screen_orientations(
+            polygon, z, setback, orientations, geometries[0],
+            stall_width, street_edge,
+        )
+
     best = None
     option_candidates = []
 
-    for angle in orientations:
+    for index, angle in enumerate(orientations, start=1):
+        if progress:
+            progress(
+                "Developing option %d of %d (%.0f deg)"
+                % (index, len(orientations), angle)
+            )
         basis = make_basis(origin, angle)
         orientation_best = None
         for geometry in geometries:
@@ -3965,18 +4159,25 @@ def _search_layouts(polygon, z, setback, access_points, stall_width, park_config
     return best
 
 
-def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH, street_edge=None):
-    """Pack with 90 degree stalls; diagonal only if perpendicular finds nothing."""
+def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH,
+                street_edge=None, progress=None):
+    """Pack with 90 degree stalls; diagonal only if perpendicular finds nothing.
+
+    ``progress`` is an optional callable receiving short status strings so a
+    caller can keep the user informed during a long solve.
+    """
     if street_edge and not access_points:
         access_points = access_points_on_street_edge(street_edge)
 
     best = _search_layouts(
-        polygon, z, setback, access_points, stall_width, PARK_CONFIGS, street_edge,
+        polygon, z, setback, access_points, stall_width, PARK_CONFIGS,
+        street_edge, progress=progress,
     )
 
     if best is None:
         best = _search_layouts(
-            polygon, z, setback, access_points, stall_width, DIAGONAL_FALLBACK_CONFIGS, street_edge,
+            polygon, z, setback, access_points, stall_width,
+            DIAGONAL_FALLBACK_CONFIGS, street_edge, progress=progress,
         )
 
     if best:
