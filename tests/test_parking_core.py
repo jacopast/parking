@@ -19,7 +19,7 @@ REFERENCE_SITE = [
 
 
 class BayIslandReferenceTests(unittest.TestCase):
-    def test_reference_horizontal_uses_clean_rectangular_field(self):
+    def test_reference_horizontal_keeps_full_capacity(self):
         street = core.street_edge_from_index(REFERENCE_SITE, 0)
         layout = core.best_layout(
             REFERENCE_SITE,
@@ -33,29 +33,29 @@ class BayIslandReferenceTests(unittest.TestCase):
             key=lambda option: abs(core.angle_key(option["angle"])),
         )
 
-        self.assertEqual(horizontal["run_count"], 3)
-        self.assertEqual(horizontal["stall_count"], 124)
+        # Capacity is the primary objective; ordered rectangular fields are
+        # preferred only when they do not strand a large amount of parking.
+        self.assertEqual(horizontal["run_count"], 4)
+        self.assertEqual(horizontal["stall_count"], 162)
         self.assertEqual(horizontal["perimeter_stalls"], 76)
         self.assertEqual(
             horizontal["stall_count"] - horizontal["perimeter_stalls"],
-            48,
+            86,
         )
         double_loaded = [
             run for run in horizontal["skeleton_runs"] if len(run["rows"]) == 2
         ]
-        self.assertEqual(len(double_loaded), 3)
+        self.assertEqual(len(double_loaded), 4)
         self.assertTrue(
             all(len(run["rows"]) == 2 for run in horizontal["skeleton_runs"])
         )
-        self.assertEqual(horizontal["interior_field_count"], 1)
-        field = core.as_xy_polygon(horizontal["interior_fields"][0])
-        self.assertEqual(len(field), 4)
         inner = core.as_xy_polygon(horizontal["ring_inner_poly"])
-        for x, y in field:
-            self.assertTrue(
-                core.point_inside(inner, x, y)
-                or core.distance_to_polygon(inner, x, y) < 0.1
-            )
+        for field in horizontal.get("interior_fields") or []:
+            for x, y in core.as_xy_polygon(field):
+                self.assertTrue(
+                    core.point_inside(inner, x, y)
+                    or core.distance_to_polygon(inner, x, y) < 0.1
+                )
         # Tip dead-zone landscape sits outside the ring, not in the aisle.
         outer = core.as_xy_polygon(horizontal["ring_outer_poly"])
         pockets = core.tip_pocket_islands(REFERENCE_SITE, horizontal, 0.0)
@@ -212,6 +212,66 @@ class GeometryFailureRegressionTests(unittest.TestCase):
         ratio = abs(core.signed_area(simplified) / core.signed_area(circle))
         self.assertGreater(ratio, 0.95)
         self.assertLess(ratio, 1.05)
+
+    def test_curved_boundary_still_gets_perimeter_parking(self):
+        """Short chords must merge into runs, or curved sites lose all rows."""
+        blob = [
+            (
+                150 + 150 * (1 + 0.18 * math.sin(3 * a)) * math.cos(a),
+                150 + 120 * (1 + 0.15 * math.cos(2 * a)) * math.sin(a),
+            )
+            for a in [2 * math.pi * i / 48 for i in range(48)]
+        ]
+        edges = [
+            math.hypot(
+                blob[(i + 1) % len(blob)][0] - blob[i][0],
+                blob[(i + 1) % len(blob)][1] - blob[i][1],
+            )
+            for i in range(len(blob))
+        ]
+        min_row = core.STALL_WIDTH * (
+            core.TERMINAL_ISLAND_COLUMNS * 2 + core.MIN_RUN_COLUMNS
+        )
+        # No single chord is long enough; runs are what make this work.
+        self.assertTrue(all(length < min_row for length in edges))
+
+        runs = core.boundary_straight_runs(blob, min_row, skip_index=0)
+        self.assertGreaterEqual(len(runs), 3)
+
+        street = core.street_edge_from_index(blob, 0)
+        stalls, _placed, _islands = core.perimeter_row(
+            blob, 0.0, 5.0, None, core.STALL_WIDTH, street_edge=street,
+        )
+        self.assertGreater(len(stalls), 20)
+
+        layout = core.best_layout(
+            blob, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        self.assertIsNotNone(layout)
+        self.assertGreater(layout["perimeter_stalls"], 20)
+        # Interior must not be abandoned just because one clean ring failed.
+        self.assertGreater(
+            layout["stall_count"] - layout["perimeter_stalls"], 0,
+        )
+
+    def test_raster_fields_find_off_center_rectangles(self):
+        parcel = [
+            (0, 0), (500, 0), (500, 180),
+            (220, 180), (220, 450), (0, 450),
+        ]
+        basis = core.make_basis(core.polygon_centroid(parcel), 0.0)
+        rects = core._raster_field_candidates(parcel, basis)
+        self.assertGreaterEqual(len(rects), 2)
+        for u0, u1, v0, v1 in rects:
+            self.assertGreaterEqual(u1 - u0, core.MIN_INTERIOR_FIELD_U)
+            self.assertGreaterEqual(v1 - v0, core.MIN_INTERIOR_FIELD_V)
+            self.assertTrue(
+                core.rectangular_field_is_strictly_inside(
+                    parcel, basis, (u0, u1, v0, v1),
+                )
+            )
 
     def test_all_true_spans_keeps_every_lobe(self):
         flags = [False, True, True, False, True, True, True, False, True]

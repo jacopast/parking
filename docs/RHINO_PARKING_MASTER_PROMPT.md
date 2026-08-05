@@ -162,6 +162,14 @@ STEP C — Parking core
     a 24 ft drive/cross-aisle gap.
   - Every rectangle must be wholly inside the core; reject rectangles that
     bridge a concave notch even when all four corners happen to be inside.
+  - Find rectangles by rasterizing the core and taking maximal all-inside
+    rectangles (greedy peel plus half-plane restarts). Symmetric growth from
+    a seed point misses off-center fields and wastes large areas.
+  - A field rectangle BOUNDS the lattice; it does not replace the core for
+    containment. Stalls are still validated against the real core polygon.
+  - Capacity stays the objective. Prefer ordered fields, but fall back to the
+    boundary-following lattice when it wins by a wide margin, otherwise a
+    curved or tapered parcel throws away usable parking.
 
 STEP D — Aisle-orientation options (search more, present three)
   Seed directions: street-perpendicular, street-parallel, dominant edges.
@@ -242,6 +250,11 @@ STEP I — Populate stalls LAST
     layout is aisle-centred.
   - Perimeter stalls: single-loaded outside the ring, backs toward setback /
     property edge, fronts toward ring. Skip street-frontage edge entirely.
+  - Run rows along MERGED nearly-collinear boundary chords, not single edges.
+    A simplified curve is a chain of 10-20 ft chords, so per-edge testing
+    rejects every perimeter row and leaves curved sites with zero perimeter
+    parking. Merge while the heading stays within ~20 deg and no vertex
+    strays more than about half a stall width from the run chord.
   - Interior of ring is NOT also single-loaded as a second perimeter ring
     (that wastes a module edge).
 
@@ -411,6 +424,43 @@ K. street_inward_normal + ray cast for driveway_throat_target.
 - Prefer closed polylines for stalls/aisles/islands/curbs.
 - Comments in English; user-facing MessageBox English is OK.
 - Keep the whole rhino/ folder together for distribution.
+
+
+═══════════════════════════════════════════════════════════════════════════════
+9. BACKLOG — LESSONS FROM ParkCAD (Transoft)
+═══════════════════════════════════════════════════════════════════════════════
+
+Observed in the ParkCAD demo and adopted as planned work. Items marked DONE
+are already implemented; the rest are queued.
+
+□ 1. Interactive orientation preview
+     ParkCAD rotates the module axis live under the cursor and reports stall
+     count as it turns.
+     DONE (headless): edge-parallel / perpendicular seeds plus a 15 deg sweep.
+     TODO: Rhino-side live rotation preview with running stall count.
+
+□ 2. Row groups as first-class objects
+     ParkCAD treats each aisle-sharing row as one editable entity ("Edit Row"):
+     per-row orientation, one-way vs two-way, delete, restripe.
+     TODO: promote skeleton runs to a stable Row Group record (id, aisle,
+     flow, orientation, stalls) and emit one Rhino group + sublayer per row so
+     a single row can be edited without regenerating the whole lot.
+
+□ 3. Flow arrows and turn-aware island shaping
+     End-cap islands exist; ParkCAD additionally draws flow direction and
+     reshapes the island nose to match the legal turn into the aisle.
+     DONE: end-cap / mid-row islands, R5 island and R15 ring fillets.
+     TODO: per-row flow arrows, and island nose fillet driven by the actual
+     turn direction and one-way vs two-way flow.
+
+□ 4. Swept-path verification of aisle width
+     ParkCAD sweeps a template vehicle reversing out of a stall and turning at
+     intersections, then flags conflicts.
+     DONE: fixed 24 ft aisle rule, ring centreline corner test, connectivity
+     flood fill.
+     TODO: template-vehicle swept path for backing out and for ring / cross
+     aisle turns; on conflict widen the aisle or drop the offending stalls and
+     re-score, so aisle width becomes an outcome rather than a constant.
 
 Build the toolkit now.
 ```

@@ -341,8 +341,12 @@ def signed_area(polygon):
     return 0.5 * area
 
 
-def interior_angle_deg(polygon, index):
-    """Interior angle at polygon[index] in degrees."""
+def interior_angle_deg(polygon, index, ccw=None):
+    """Interior angle at polygon[index] in degrees.
+
+    ``ccw`` lets a caller that walks every vertex compute the winding once
+    instead of paying an O(n) signed-area scan per vertex.
+    """
     count = len(polygon)
     ax, ay = polygon[(index - 1) % count]
     bx, by = polygon[index]
@@ -350,8 +354,10 @@ def interior_angle_deg(polygon, index):
     in_x, in_y = bx - ax, by - ay
     out_x, out_y = cx - bx, cy - by
     turn = math.atan2(in_x * out_y - in_y * out_x, in_x * out_x + in_y * out_y)
+    if ccw is None:
+        ccw = signed_area(polygon) >= 0
     # CCW boundary: positive turn is left; interior = 180 - turn_deg.
-    if signed_area(polygon) >= 0:
+    if ccw:
         interior = 180.0 - math.degrees(turn)
     else:
         interior = 180.0 + math.degrees(turn)
@@ -365,8 +371,9 @@ def interior_angle_deg(polygon, index):
 def acute_vertices(polygon, threshold_deg=ACUTE_CORNER_DEG):
     """Vertices too sharp for 90 degree parking access."""
     result = []
+    ccw = signed_area(polygon) >= 0
     for index in range(len(polygon)):
-        angle = interior_angle_deg(polygon, index)
+        angle = interior_angle_deg(polygon, index, ccw)
         if angle < threshold_deg:
             result.append((index, angle, polygon[index]))
     return result
@@ -382,7 +389,11 @@ def as_xy_polygon(points):
 def polygon_min_interior_angle(polygon):
     if not polygon or len(polygon) < 3:
         return 0.0
-    return min(interior_angle_deg(polygon, index) for index in range(len(polygon)))
+    ccw = signed_area(polygon) >= 0
+    return min(
+        interior_angle_deg(polygon, index, ccw)
+        for index in range(len(polygon))
+    )
 
 
 def drive_path_has_sharp_turn(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG):
@@ -408,9 +419,10 @@ def chamfer_acute_corners(polygon, min_corner_deg=MIN_DRIVE_CORNER_DEG,
 
     for _ in range(max_passes):
         n = len(poly)
+        ccw = signed_area(poly) >= 0
         acute = [
             index for index in range(n)
-            if interior_angle_deg(poly, index) < min_corner_deg - 0.5
+            if interior_angle_deg(poly, index, ccw) < min_corner_deg - 0.5
         ]
         if not acute:
             return poly
@@ -552,8 +564,9 @@ def tip_keepout_triangles(polygon, cut=None, threshold_deg=None, ring_outer_poly
     outer = as_xy_polygon(ring_outer_poly) if ring_outer_poly else None
     tris = []
     count = len(polygon)
+    ccw = signed_area(polygon) >= 0
     for index in range(count):
-        angle = interior_angle_deg(polygon, index)
+        angle = interior_angle_deg(polygon, index, ccw)
         if angle >= threshold_deg - 0.5:
             continue
         curr = polygon[index]
@@ -583,17 +596,46 @@ def tip_keepout_triangles(polygon, cut=None, threshold_deg=None, ring_outer_poly
     return tris
 
 
-def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT, ring_outer_poly=None):
-    """True when a point sits in a tip that cars cannot serve."""
-    for tri in tip_keepout_triangles(polygon, ring_outer_poly=ring_outer_poly):
-        if point_inside(tri, x, y):
-            return True
+_TIP_KEEPOUT_CACHE = {}
+
+
+def _tip_keepout_zones(polygon, keep_out, ring_outer_poly):
+    """Cached tip triangles + vertex keep-out radii for one polygon/ring pair.
+
+    Stall placement probes thousands of points against the same tips, and
+    rebuilding the triangles each time dominated the solve.
+    """
+    key = (
+        id(polygon), len(polygon), polygon[0], polygon[-1],
+        id(ring_outer_poly), round(keep_out, 3),
+    )
+    cached = _TIP_KEEPOUT_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    tris = tip_keepout_triangles(polygon, ring_outer_poly=ring_outer_poly)
+    outer = as_xy_polygon(ring_outer_poly) if ring_outer_poly else None
+    circles = []
     for _index, angle, (vx, vy) in acute_vertices(polygon, MIN_DRIVE_CORNER_DEG):
         radius = max(keep_out, tip_clearance_depth(angle) * 0.5)
-        if ring_outer_poly:
-            outer = as_xy_polygon(ring_outer_poly)
-            if len(outer) >= 3:
-                radius = max(radius, distance_to_polygon(outer, vx, vy) - 1.0)
+        if outer and len(outer) >= 3:
+            radius = max(radius, distance_to_polygon(outer, vx, vy) - 1.0)
+        circles.append((vx, vy, radius))
+
+    zones = (tris, circles)
+    if len(_TIP_KEEPOUT_CACHE) > 256:
+        _TIP_KEEPOUT_CACHE.clear()
+    _TIP_KEEPOUT_CACHE[key] = zones
+    return zones
+
+
+def near_acute_corner(x, y, polygon, keep_out=ACUTE_KEEP_OUT, ring_outer_poly=None):
+    """True when a point sits in a tip that cars cannot serve."""
+    tris, circles = _tip_keepout_zones(polygon, keep_out, ring_outer_poly)
+    for tri in tris:
+        if point_inside(tri, x, y):
+            return True
+    for vx, vy, radius in circles:
         if math.hypot(x - vx, y - vy) <= radius:
             return True
     return False
@@ -1592,6 +1634,90 @@ MIN_INTERIOR_FIELD_U = STALL_WIDTH * (
     TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
 )
 MIN_INTERIOR_FIELD_V = DOUBLE_LOADED_MODULE
+# Raster resolution for the largest-inscribed-rectangle search. Center-grown
+# rectangles are symmetric about their seed and miss off-center fields, which
+# is what left curved cores mostly empty.
+CORE_RASTER_MAX_CELLS = 3600
+CORE_RASTER_MIN_CELL = 4.0
+_CORE_GRID_CACHE = {}
+
+
+def _core_binary_grid(polygon, basis, margin=0.0):
+    """Rasterize a core polygon in the parking frame; True = fully inside."""
+    poly = as_xy_polygon(polygon)
+    key = (
+        tuple((round(x, 2), round(y, 2)) for x, y in poly),
+        round(basis["angle"], 3),
+        round(margin, 2),
+    )
+    cached = _CORE_GRID_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    min_u, max_u, min_v, max_v = local_bounds(poly, basis)
+    span_u = max_u - min_u
+    span_v = max_v - min_v
+    if span_u < MIN_INTERIOR_FIELD_U or span_v < MIN_INTERIOR_FIELD_V:
+        _CORE_GRID_CACHE[key] = None
+        return None
+
+    cell = max(
+        CORE_RASTER_MIN_CELL,
+        math.sqrt(span_u * span_v / float(CORE_RASTER_MAX_CELLS)),
+    )
+    cols = int(span_u / cell)
+    rows = int(span_v / cell)
+    if cols < 2 or rows < 2:
+        _CORE_GRID_CACHE[key] = None
+        return None
+
+    half_diagonal = cell * 0.7072
+    grid = []
+    for row in range(rows):
+        v = min_v + (row + 0.5) * cell
+        line = []
+        for col in range(cols):
+            u = min_u + (col + 0.5) * cell
+            x, y = to_world(basis, u, v)
+            inside = (
+                point_inside(poly, x, y)
+                and distance_to_polygon(poly, x, y) >= margin + half_diagonal
+            )
+            line.append(inside)
+        grid.append(line)
+
+    result = (grid, min_u, min_v, cell, rows, cols)
+    if len(_CORE_GRID_CACHE) > 64:
+        _CORE_GRID_CACHE.clear()
+    _CORE_GRID_CACHE[key] = result
+    return result
+
+
+def _largest_rect_in_grid(grid, rows, cols, blocked=None):
+    """Maximal all-True rectangle via the histogram stack method."""
+    best = None
+    best_area = 0
+    heights = [0] * cols
+    for row in range(rows):
+        for col in range(cols):
+            open_cell = grid[row][col] and not (
+                blocked is not None and blocked[row][col]
+            )
+            heights[col] = heights[col] + 1 if open_cell else 0
+
+        stack = []
+        for col in range(cols + 1):
+            height = heights[col] if col < cols else 0
+            start = col
+            while stack and stack[-1][1] >= height:
+                left, tall = stack.pop()
+                area = tall * (col - left)
+                if area > best_area:
+                    best_area = area
+                    best = (row - tall + 1, row, left, col - 1)
+                start = left
+            stack.append((start, height))
+    return best, best_area
 
 
 def rectangular_field_is_strictly_inside(polygon, basis, rect, margin=0.0):
@@ -1620,6 +1746,82 @@ def rectangular_field_is_strictly_inside(polygon, basis, rect, margin=0.0):
     return True
 
 
+def _raster_field_candidates(polygon, basis, margin=0.0):
+    """Largest inscribed rectangles, peeled greedily off a rasterized core.
+
+    Each accepted rectangle is masked out (plus one aisle of separation) before
+    the next search, so a lobed core yields genuinely distinct fields instead
+    of nested variations of the same one.
+    """
+    raster = _core_binary_grid(polygon, basis, margin)
+    if raster is None:
+        return []
+    grid, min_u, min_v, cell, rows, cols = raster
+
+    separation_cells = int(math.ceil(FIELD_SEPARATION / cell))
+    rects = []
+
+    def to_uv(cell_rect):
+        row0, row1, col0, col1 = cell_rect
+        return (
+            min_u + col0 * cell,
+            min_u + (col1 + 1) * cell,
+            min_v + row0 * cell,
+            min_v + (row1 + 1) * cell,
+        )
+
+    def keep(rect):
+        u0, u1, v0, v1 = rect
+        if u1 - u0 < MIN_INTERIOR_FIELD_U or v1 - v0 < MIN_INTERIOR_FIELD_V:
+            return
+        rects.append(rect)
+
+    def mask(blocked, cell_rect):
+        row0, row1, col0, col1 = cell_rect
+        for row in range(
+            max(0, row0 - separation_cells),
+            min(rows, row1 + separation_cells + 1),
+        ):
+            for col in range(
+                max(0, col0 - separation_cells),
+                min(cols, col1 + separation_cells + 1),
+            ):
+                blocked[row][col] = True
+
+    # Greedy peel: largest field, then the next largest clear of it.
+    blocked = [[False] * cols for _ in range(rows)]
+    for _ in range(MAX_INTERIOR_FIELDS):
+        cell_rect, area_cells = _largest_rect_in_grid(grid, rows, cols, blocked)
+        if not cell_rect or area_cells <= 0:
+            break
+        keep(to_uv(cell_rect))
+        mask(blocked, cell_rect)
+
+    # Half-plane restarts. A single greedy rectangle can straddle the middle of
+    # a tapered or lobed core and leave both ends unusable; these give the
+    # combination search proper staircase pieces to work with.
+    half_row = rows // 2
+    half_col = cols // 2
+    halves = (
+        (0, half_row, 0, cols),
+        (half_row, rows, 0, cols),
+        (0, rows, 0, half_col),
+        (0, rows, half_col, cols),
+    )
+    for row_start, row_end, col_start, col_end in halves:
+        if row_end - row_start < 2 or col_end - col_start < 2:
+            continue
+        blocked = [[True] * cols for _ in range(rows)]
+        for row in range(row_start, row_end):
+            for col in range(col_start, col_end):
+                blocked[row][col] = False
+        cell_rect, area_cells = _largest_rect_in_grid(grid, rows, cols, blocked)
+        if cell_rect and area_cells > 0:
+            keep(to_uv(cell_rect))
+
+    return rects
+
+
 def rectangular_field_candidates(polygon, basis, margin=0.0):
     """Find clean rectangular parking fields inside an irregular core.
 
@@ -1633,29 +1835,9 @@ def rectangular_field_candidates(polygon, basis, margin=0.0):
     if width < MIN_INTERIOR_FIELD_U or height < MIN_INTERIOR_FIELD_V:
         return []
 
-    raw = []
-    fitted = fitted_ortho_rect(polygon, basis, margin)
-    if fitted:
-        raw.append(fitted)
-
-    max_half_u = 0.5 * width
-    max_half_v = 0.5 * height
-    # More centers than fitted_ortho_rect: outer lobe centers are what let a
-    # U/L/notched parcel become two or three ordered fields.
-    fractions = (0.14, 0.26, 0.38, 0.50, 0.62, 0.74, 0.86)
-    for fu in fractions:
-        for fv in fractions:
-            cu = min_u + width * fu
-            cv = min_v + height * fv
-            x, y = to_world(basis, cu, cv)
-            if not has_clearance(polygon, x, y, margin):
-                continue
-            rect, _area = _parking_rect_from_center(
-                polygon, basis, cu, cv,
-                min_u, max_u, min_v, max_v, margin,
-            )
-            if rect:
-                raw.append(rect)
+    # Raster maximal rectangles replace symmetric center growth: they find
+    # off-center fields and cost a fraction of the binary-search probing.
+    raw = _raster_field_candidates(polygon, basis, margin)
 
     candidates = []
     seen = set()
@@ -1735,49 +1917,6 @@ def rectangular_field_candidates(polygon, basis, margin=0.0):
     return unique[:MAX_FIELD_CANDIDATES]
 
 
-def _parking_rect_from_center(
-    polygon, basis, cu, cv, min_u, max_u, min_v, max_v, margin,
-):
-    """Largest useful parking rectangle at a center, including narrow lobes."""
-    available_half_u = min(cu - min_u, max_u - cu)
-    available_half_v = min(cv - min_v, max_v - cv)
-    if (
-        available_half_u * 2.0 < MIN_INTERIOR_FIELD_U
-        or available_half_v * 2.0 < MIN_INTERIOR_FIELD_V
-    ):
-        return None, 0.0
-
-    best = None
-    best_area = 0.0
-    for index in range(1, 18):
-        hu = available_half_u * index / 17.0
-        if 2.0 * hu < MIN_INTERIOR_FIELD_U:
-            continue
-        lo = 0.0
-        hi = available_half_v
-        fit_hv = None
-        for _ in range(16):
-            hv = 0.5 * (lo + hi)
-            if 2.0 * hv < MIN_INTERIOR_FIELD_V:
-                lo = hv
-                continue
-            rect = (cu - hu, cu + hu, cv - hv, cv + hv)
-            if rectangular_field_is_strictly_inside(
-                polygon, basis, rect, margin,
-            ):
-                fit_hv = hv
-                lo = hv
-            else:
-                hi = hv
-        if fit_hv is None:
-            continue
-        area = 4.0 * hu * fit_hv
-        if area > best_area:
-            best_area = area
-            best = (cu - hu, cu + hu, cv - fit_hv, cv + fit_hv)
-    return best, best_area
-
-
 def rectangular_fields_compatible(first, second, separation=FIELD_SEPARATION):
     """Separate independently phased fields by one drive aisle."""
     au0, au1, av0, av1 = first
@@ -1836,15 +1975,15 @@ def layout_composed_rectangular_fields(
     candidates = rectangular_field_candidates(polygon, basis, margin=0.0)
     developed = []
     for rect in candidates:
-        field_poly = rect_polygon_2d(
-            basis, rect[0], rect[1], rect[2], rect[3],
-        )
+        # Stalls are still validated against the real core; the rectangle only
+        # bounds where the ordered lattice may sit, so row ends stay aligned.
         interior = layout_for_angle(
-            field_poly, basis, 0.0, z, geometry,
+            polygon, basis, 0.0, z, geometry,
             drive_polygon=drive_polygon or polygon,
             site_polygon=site_polygon,
             entrance_points=entrance_points,
             compose_fields=False,
+            uv_bounds=rect,
         )
         if not interior or interior.get("stall_count", 0) <= 0:
             continue
@@ -2542,7 +2681,8 @@ def _build_single_loaded_strip(core_polygon, drive_polygon, basis, geometry,
 
 
 def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
-                                drive_polygon=None, site_polygon=None):
+                                drive_polygon=None, site_polygon=None,
+                                uv_bounds=None):
     """Lay out bay islands before any stall is drawn.
 
     A bay island is the 36 ft back-to-back stall pair the manual drawing
@@ -2555,6 +2695,10 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
     After the double-loaded lattice is placed, leftover v-strips that still
     fit a single-loaded module (18 + 24) are filled separately so tapered
     and non-60-multiple cores do not waste a whole band.
+
+    ``uv_bounds`` restricts the lattice to one clean rectangular field while
+    still validating stalls against the real core, so row ends line up in an
+    ordered block instead of tracing the parcel boundary.
     """
     if drive_polygon is None:
         drive_polygon = core_polygon
@@ -2562,7 +2706,12 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
     aisle = geometry["aisle"]
     period = geometry["double_module"]
     single = geometry["single_module"]
-    core_min_u, core_max_u, core_min_v, core_max_v = local_bounds(core_polygon, basis)
+    if uv_bounds is None:
+        core_min_u, core_max_u, core_min_v, core_max_v = local_bounds(
+            core_polygon, basis,
+        )
+    else:
+        core_min_u, core_max_u, core_min_v, core_max_v = uv_bounds
     min_v = core_min_v + depth
     max_v = core_max_v - depth
     if max_v < min_v - 0.001:
@@ -2874,10 +3023,11 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
 
 def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
                      site_polygon=None, entrance_points=None,
-                     compose_fields=True):
+                     compose_fields=True, uv_bounds=None):
     # The PDF workflow uses centerline -> full module envelope -> trim ->
     # stalls. Keep the old tile path only for diagonal emergency fallback.
     if geometry["park_angle"] == 90 and clearance <= 0.001:
+        composed = None
         if compose_fields:
             composed = layout_composed_rectangular_fields(
                 polygon, basis, z, geometry,
@@ -2885,8 +3035,6 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
                 site_polygon=site_polygon,
                 entrance_points=entrance_points,
             )
-            if composed:
-                return composed
 
         period = geometry["double_module"]
         steps = max(V_PHASE_STEPS, 12)
@@ -2915,6 +3063,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
             seen.add(key)
             skeleton = build_module_skeleton_phase(
                 polygon, basis, geometry, phase, drive_polygon, site_polygon,
+                uv_bounds=uv_bounds,
             )
             if skeleton is None:
                 continue
@@ -2927,11 +3076,20 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
             if best_skeleton is None or rank > best_rank:
                 best_skeleton = skeleton
                 best_rank = rank
+        lattice = None
         if best_skeleton:
-            return materialize_module_skeleton(
+            lattice = materialize_module_skeleton(
                 best_skeleton, basis, geometry, z,
             )
-        return None
+        if composed and lattice:
+            # Ordered rectangles are the preferred product. Fall back to the
+            # boundary-tracing lattice only when it wins by a wide margin,
+            # because that is the case where clean fields would strand a lot
+            # of otherwise usable parking area.
+            if lattice["stall_count"] > composed["stall_count"] * 1.15:
+                return lattice
+            return composed
+        return composed or lattice
 
     pitch = geometry["stall_pitch"]
     period = geometry["double_module"]
@@ -3109,26 +3267,98 @@ def stalls_along_world_edge(
     return stalls, occupied, islands
 
 
+def boundary_straight_runs(polygon, min_length, skip_index=None,
+                           max_turn_deg=20.0, max_sagitta=None):
+    """Merge nearly-collinear boundary edges into straight parking runs.
+
+    A simplified curve is a chain of short chords, so testing edges one at a
+    time rejects every perimeter row on a curved parcel. Runs are grown while
+    the direction stays within ``max_turn_deg`` of the run start and no vertex
+    strays further than ``max_sagitta`` from the run chord.
+    """
+    count = len(polygon)
+    if count < 3:
+        return []
+    if max_sagitta is None:
+        max_sagitta = STALL_WIDTH * 0.75
+
+    def direction(index):
+        ax, ay = polygon[index]
+        bx, by = polygon[(index + 1) % count]
+        length = math.hypot(bx - ax, by - ay)
+        if length < 1e-9:
+            return None, 0.0
+        return ((bx - ax) / length, (by - ay) / length), length
+
+    usable = []
+    for index in range(count):
+        if skip_index is not None and index == skip_index:
+            usable.append(False)
+            continue
+        _dir, length = direction(index)
+        usable.append(length > 1e-9)
+
+    runs = []
+    start = 0
+    while start < count:
+        if not usable[start]:
+            start += 1
+            continue
+
+        start_dir, _length = direction(start)
+        members = [start]
+        end = start
+        while True:
+            nxt = end + 1
+            if nxt >= count or not usable[nxt]:
+                break
+            next_dir, _next_length = direction(nxt)
+            if next_dir is None:
+                break
+            dot = start_dir[0] * next_dir[0] + start_dir[1] * next_dir[1]
+            dot = max(-1.0, min(1.0, dot))
+            if math.degrees(math.acos(dot)) > max_turn_deg:
+                break
+
+            # Chord deviation guard: a run must stay close to the real boundary.
+            chord_a = polygon[members[0]]
+            chord_b = polygon[(nxt + 1) % count]
+            too_far = False
+            for member in members[1:] + [nxt]:
+                if _perpendicular_distance(
+                    polygon[member], chord_a, chord_b,
+                ) > max_sagitta:
+                    too_far = True
+                    break
+            if too_far:
+                break
+
+            members.append(nxt)
+            end = nxt
+
+        a = polygon[members[0]]
+        b = polygon[(members[-1] + 1) % count]
+        if math.hypot(b[0] - a[0], b[1] - a[1]) >= min_length:
+            runs.append((a, b, tuple(members)))
+        start = end + 1
+
+    return runs
+
+
 def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH, street_edge=None):
     """Offset-ring helper: stalls backing onto a constant-offset contour."""
     stalls = []
     islands = []
     placed = placed if placed is not None else []
-    count = len(polygon)
     street_index = street_edge["index"] if street_edge else None
 
-    for index in range(count):
-        # Leave the street frontage open for curb cuts into the ring.
-        if street_index is not None and index == street_index:
-            continue
+    min_slots = TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
+    runs = boundary_straight_runs(
+        polygon, stall_width * min_slots, skip_index=street_index,
+    )
 
-        ax, ay = polygon[index]
-        bx, by = polygon[(index + 1) % count]
+    for (ax, ay), (bx, by), _members in runs:
         edge_length = math.hypot(bx - ax, by - ay)
-        min_slots = TERMINAL_ISLAND_COLUMNS * 2 + MIN_RUN_COLUMNS
-        if edge_length < stall_width * min_slots:
-            continue
-
         dx = (bx - ax) / edge_length
         dy = (by - ay) / edge_length
         nx, ny = -dy, dx
@@ -3594,7 +3824,31 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
             raw_outer = offset_polygon(polygon, ring_outer)
         if not raw_outer:
             return None, None
-        outer_points = [(x, y, z) for x, y in as_xy_polygon(raw_outer)]
+        drive_poly = as_xy_polygon(raw_outer)
+        outer_points = [(x, y, z) for x, y in drive_poly]
+
+        # A single clean ring loop can fail on a wiggly / lobed parcel even
+        # though the interior still holds ordered parking fields. Erode the
+        # usable curb by one aisle and keep solving instead of shipping a
+        # perimeter-only layout with an empty middle.
+        interior = None
+        lobes = [
+            lobe for lobe in offset_polygon_all(drive_poly, RING_WIDTH)
+            if len(lobe) >= 3
+        ]
+        lobes.sort(key=lambda lobe: abs(signed_area(lobe)), reverse=True)
+        for core_poly in lobes[:2]:
+            if abs(signed_area(core_poly)) < MIN_INTERIOR_FIELD_U * MIN_INTERIOR_FIELD_V:
+                continue
+            trial = layout_for_angle(
+                core_poly, pack_basis, 0.0, z, geometry, drive_poly, polygon,
+                entrance_points=entrance_points,
+            )
+            if not trial:
+                continue
+            if interior is None or trial.get("stall_count", 0) > interior.get("stall_count", 0):
+                interior = trial
+
         ring_meta = {
             "ring_mode": "offset",
             "ring_outer": ring_outer,
@@ -3605,9 +3859,9 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
             "chamfer_side": chamfer_side,
         }
         return compose_candidate(
-            perimeter_stalls, None, pack_basis, geometry, ring_meta, polygon,
+            perimeter_stalls, interior, pack_basis, geometry, ring_meta, polygon,
             street_edge, ring_islands=perimeter_islands,
-        ), None
+        ), interior
 
     for variant in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
@@ -3912,6 +4166,9 @@ def offset_result_is_valid(original, offset, distance, tol=0.75):
     return True
 
 
+_EROSION_CACHE = {}
+
+
 def erode_polygon_components(polygon, distance, cell=2.5):
     """Raster inward offset. Returns zero or more simple component polygons.
 
@@ -3924,6 +4181,16 @@ def erode_polygon_components(polygon, distance, cell=2.5):
         return []
     if distance <= 1e-9:
         return [list(poly)]
+
+    # Orientation and phase searches re-erode the same few polygons many times.
+    cache_key = (
+        tuple((round(x, 2), round(y, 2)) for x, y in poly),
+        round(distance, 2),
+        round(cell, 2),
+    )
+    cached = _EROSION_CACHE.get(cache_key)
+    if cached is not None:
+        return [list(component) for component in cached]
 
     xs = [p[0] for p in poly]
     ys = [p[1] for p in poly]
@@ -3998,6 +4265,9 @@ def erode_polygon_components(polygon, distance, cell=2.5):
                     if inside_ok and signed_area(poly) * signed_area(outline) > 0:
                         components.append(outline)
     components.sort(key=lambda ring: abs(signed_area(ring)), reverse=True)
+    if len(_EROSION_CACHE) > 64:
+        _EROSION_CACHE.clear()
+    _EROSION_CACHE[cache_key] = [list(component) for component in components]
     return components
 
 
