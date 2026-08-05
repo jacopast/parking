@@ -1,10 +1,13 @@
 """Headless harness: run parking_core.best_layout and draw the result to SVG.
 
-Mirrors what parking_layout.draw_layout() puts in the Rhino document so the
-output can be compared with the manual drawings without Rhino.
+Mirrors the land-use model used in Rhino:
+
+    non-drivable (green)  -> tip pockets, setbacks, end-caps, mid-islands
+    standing (yellow)     -> parking stalls
+    moving (residual)     -> the 24 ft aisle emerges as the gap between greens
+
+The authored ring centreline is diagnostic only; the product aisle is residual.
 """
-import importlib
-import math
 import os
 import sys
 
@@ -13,23 +16,26 @@ sys.path.insert(0, CORE_DIR)
 sys.modules.pop("parking_core", None)
 import parking_core as core  # noqa: E402
 
-# Site traced from the manual drawing (feet, origin = bottom-left corner).
+# Site measured from the vector reference PDF (feet, origin = bottom-left).
+# Keep this as the regression parcel: the target has four horizontal,
+# double-loaded bay islands when the 0 degree option is selected.
 SITE = [
     (0.0, 0.0),
-    (182.0, 0.0),
-    (303.0, 197.0),
-    (0.0, 425.0),
+    (173.0, 0.0),
+    (290.0, 188.0),
+    (0.0, 407.0),
 ]
 STREET_INDEX = 0  # bottom edge
 SETBACK = 5.0
 
 COLORS = {
     "boundary": "#111111",
+    "non_drivable": "#4c8c54",
+    "non_drivable_stroke": "#3a6b40",
     "stalls": "#f5b301",
-    "aisles": "#3d5a80",
-    "circulation": "#118ab2",
-    "curbs": "#8a8a8a",
-    "islands": "#4c8c54",
+    "stall_fill": "#fff4cc",
+    "moving": "#d9d9d9",
+    "field": "#377eb8",
 }
 
 
@@ -57,32 +63,38 @@ def run(polygon=None, setback=SETBACK, street_index=STREET_INDEX, out="out.svg",
     else:
         layout = core.best_layout(poly3, 0.0, setback, access_points, street_edge=street_edge)
 
-    parts = [polyline(polygon, COLORS["boundary"], 1.4)]
+    parts = []
+    # Site fill = provisional "moving" pavement; greens and stalls paint over it.
+    parts.append(polyline(polygon, COLORS["boundary"], 1.2, fill=COLORS["moving"]))
     if layout is None:
         print("NO LAYOUT")
     else:
-        outer, inner = core.layout_ring_polylines(layout, poly3, 0.0)
-        for band in (outer, inner):
-            if band:
-                parts.append(polyline(band, COLORS["circulation"], 1.0))
-        for curb in core.build_curb_polylines(poly3, 0.0, layout, setback, street_edge):
-            if curb and len(curb) > 1:
-                closed = (abs(curb[0][0] - curb[-1][0]) < 1e-6
-                          and abs(curb[0][1] - curb[-1][1]) < 1e-6)
-                parts.append(polyline(curb, COLORS["curbs"], 0.8, close=closed))
-        for env in core.rounded_bay_envelopes(layout, 0.0):
-            parts.append(polyline(env, COLORS["circulation"], 0.9))
-        for pocket in core.tip_pocket_islands(poly3, layout, 0.0):
-            parts.append(polyline(pocket, COLORS["circulation"], 0.9))
-        for island in core.rounded_layout_islands(layout, 0.0):
-            parts.append(polyline(island, COLORS["islands"], 0.9))
-        for stall in layout["stalls"]:
-            parts.append(polyline(stall, COLORS["stalls"], 0.8))
+        land = core.layout_land_use(poly3, layout, setback, street_edge, 0.0)
+        for region in land["non_drivable"]:
+            parts.append(polyline(
+                region,
+                COLORS["non_drivable_stroke"],
+                0.7,
+                fill=COLORS["non_drivable"],
+            ))
+        for stall in land["standing"]:
+            parts.append(polyline(
+                stall,
+                COLORS["stalls"],
+                0.7,
+                fill=COLORS["stall_fill"],
+            ))
+        # Diagnostic only: clean rectangular interior field envelopes.
+        for field in layout.get("interior_fields") or []:
+            parts.append(polyline(field, COLORS["field"], 1.2, fill="none"))
+        parts.append(polyline(polygon, COLORS["boundary"], 1.4, fill="none"))
 
-        print("%-22s stalls=%s perimeter=%s runs=%s angle=%.1f ring=%s" % (
+        print("%-22s stalls=%s perimeter=%s fields=%s runs=%s angle=%.1f ring=%s non_drivable=%s" % (
             title or out,
             layout["stall_count"], layout["perimeter_stalls"],
+            layout.get("interior_field_count", 0),
             layout.get("run_count"), layout["angle"], layout.get("ring_mode"),
+            len(land["non_drivable"]),
         ))
         for opt in layout.get("orientation_options", []):
             print("    option %.1f deg -> %s stalls" % (opt["angle"], opt["stall_count"]))

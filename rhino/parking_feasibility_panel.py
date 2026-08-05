@@ -203,18 +203,7 @@ def generate_garage_options(rect, setback, deficit, max_levels):
 
 def draw_ring(polygon, z, layout):
     created = []
-    outer, inner = core.layout_ring_polylines(layout, polygon, z)
-
-    for band in (outer, inner):
-        if not band:
-            continue
-        valid = [point for point in band if core.point_inside(polygon, point[0], point[1])]
-        if len(valid) < 3:
-            continue
-        object_id = add_polyline(valid, LAYERS["access"])
-        if object_id:
-            created.append(object_id)
-
+    # Skip raw sharp rings here — draw_curbs emits the R15 filleted loop.
     return created
 
 

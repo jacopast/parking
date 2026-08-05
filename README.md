@@ -121,16 +121,24 @@ It generates:
 
 ```text
 Parking Layout::Available Area
+Parking Layout::NonDrivable
 Parking Layout::Stalls
-Parking Layout::Aisles
-Parking Layout::Islands
 Parking Layout::Circulation
 Parking Layout::Curbs
 ```
 
+`NonDrivable` is the green land cars must not roll on (setbacks, tip pockets,
+terminal end-caps, mid-islands). The 24 ft aisle is residual pavement between
+those greens and the stall faces — not a separately authored aisle curve.
+
 ## Design basis
 
-The hard part is geometry, not the dimension table. Published module widths define the lattice period (how wide a bay is). The layout itself comes from searching aisle orientation and lattice phase until the most stalls fit and still connect to the ring drive.
+The hard part is geometry, not the dimension table. Published module widths
+define the lattice period. The irregular inner core is treated as a container:
+the solver fits one clean rectangular parking grid, or composes two to three
+ordered rectangular grids for broad L/U/multi-lobe sites. It does not force
+interior rows to trace every curve or notch. Remaining irregular areas become
+landscape or pavement.
 
 Module widths in `rhino/parking_core.py` reproduce [Iowa SUDAS Design Manual 8B-1, Table 8B-1.02](https://www.iowasudas.org/wp-content/uploads/sites/15/2020/03/8B-1.pdf), adapted from ULI and NPA, *The Dimensions of Parking*.
 
@@ -161,6 +169,7 @@ Accessible stall counts come from the [2010 ADA Standards, Table 208.2](https://
 | Stall stripe length | 18 ft |
 | Ring drive | 24 ft |
 | Curb / terminal-island fillet | 5 ft nominal (locally limited by short edges) |
+| Two-way ring corner fillet | 15 ft nominal; acute tips use one 90° + one obtuse chamfer |
 | Efficiency target | 330 square feet per stall or better |
 | Garage bay module | 18 ft stall + 24 ft aisle + 18 ft stall = 60 ft |
 | Garage ramp/core loss | 15 percent capacity reduction |
@@ -173,7 +182,13 @@ The Rhino model should use feet.
 The packer follows the same order as a manual parking study:
 
 1. Fix the site boundary and street frontage.
-2. Establish the **site-following perimeter circulation ring first**. Acute ring corners are chamfered; obtuse corners remain.
+2. Establish the **site-following perimeter circulation ring first**. Acute
+   tips are chamfered asymmetrically so one new corner is 90° and the other
+   is obtuse. The inner curb is built first and offset outward exactly 24 ft,
+   avoiding the false wide wedge produced by independently chamfered curbs.
+   Both mirrored chamfers are developed; candidates are rejected if the
+   actual drive centerline has a sub-90° corner or cannot fit adjacent R15
+   tangencies. The higher-capacity valid layout wins.
 3. Use the actual chamfered inner ring as the parking core — not a nominal setback distance.
 4. Apply a **directional 30 ft envelope** perpendicular to each candidate aisle (18 ft stall + half of the 24 ft aisle). Do not shorten the aisle direction by 30 ft.
 5. Build exactly **three aisle-centerline options** through that domain: street-perpendicular, street-parallel, and dominant-edge aligned.
@@ -219,11 +234,17 @@ This gives a practical first-pass answer on whether a garage is needed and what 
 ## Run the Python sources without installing
 
 1. Open the target `.3dm` file in Rhino.
-2. Make sure the usable site boundary is a closed curve or polyline.
-3. Run `RunPythonScript`.
-4. Select one of the scripts in the `rhino/` folder.
-5. Follow the prompts or panel controls.
-6. Review the generated layers and summary labels.
+2. Make sure each usable site boundary is a closed curve or polyline.
+3. Run `RunPythonScript` and choose `rhino/parking_layout.py`.
+4. Select **one or more** closed available-area curves (preselect works).
+5. Enter shared setback, then choose auto-best vs pick-orientation policy.
+6. Pick each site's street frontage edge. Calculation starts only after that.
+7. If you chose pick-orientation, select among the scored options per site.
+8. Review the generated layers (`Parking Layout — Site N`) and the summary.
+
+Press **Esc at any time** to cancel the entire run. The solver checks Esc
+during orientation screening, phase/field search, erosion, connectivity, and
+drawing. Geometry drawn by the active run is rolled back on cancellation.
 
 ## Validation
 
