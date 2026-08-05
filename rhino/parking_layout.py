@@ -44,6 +44,52 @@ LAYERS = {
     "boundary": "Parking Layout::Available Area",
 }
 
+_ACTIVE_CREATED = []
+
+
+def escape_requested(reset=False):
+    """Non-throwing Rhino ESC check, compatible with Rhino 7/8 signatures."""
+    try:
+        return bool(rs.EscapeTest(False, reset))
+    except TypeError:
+        try:
+            return bool(rs.EscapeTest(False))
+        except TypeError:
+            try:
+                return bool(rs.EscapeTest())
+            except Exception:
+                return True
+    except Exception:
+        # EscapeTest may throw Rhino's cancellation exception on older builds.
+        return True
+
+
+def clear_escape():
+    try:
+        rs.EscapeTest(False, True)
+    except Exception:
+        pass
+
+
+def cancellation_checkpoint(created=None):
+    """Cancel immediately and remove geometry created by the active draw."""
+    if not escape_requested():
+        return
+    targets = list(_ACTIVE_CREATED or created or [])
+    if targets:
+        try:
+            rs.DeleteObjects(targets)
+        except Exception:
+            pass
+    _ACTIVE_CREATED[:] = []
+    raise core.LayoutCancelled("Parking layout cancelled.")
+
+
+def track_created(object_ids):
+    ids = [object_id for object_id in (object_ids or []) if object_id]
+    _ACTIVE_CREATED.extend(ids)
+    return ids
+
 
 def ensure_layer(name, color):
     if not rs.IsLayer(name):
@@ -107,6 +153,8 @@ def pick_street_edge(boundary_id, polygon, z, site_label=None):
         rs.Prompt("Street frontage for %s: pick an existing boundary edge." % site_label)
     street_edge = core.pick_street_edge(polygon, z, rs, boundary_id)
     if not street_edge:
+        if escape_requested():
+            raise core.LayoutCancelled("Parking layout cancelled.")
         rs.MessageBox(
             "Select one existing edge of this site boundary that fronts the street.\n"
             "You do not need to draw a new line.",
@@ -202,14 +250,15 @@ def choose_option(layout, site_label=None, auto_best=False):
 
     picked = rs.ListBox(labels, prompt, title, labels[0])
     if not picked:
-        return options[0]
+        raise core.LayoutCancelled("Parking layout cancelled.")
     for label, option in zip(labels, options):
         if label == picked:
             return option
     return options[0]
 
 
-def compute_layout(boundary_id, street_edge, setback, progress=None):
+def compute_layout(boundary_id, street_edge, setback, progress=None,
+                   cancel=escape_requested):
     """Run the solver only — no Rhino prompts, no drawing."""
     polygon, z = core.boundary_polygon(boundary_id, rs)
     if not polygon:
@@ -218,7 +267,7 @@ def compute_layout(boundary_id, street_edge, setback, progress=None):
     access_points = core.access_points_on_street_edge(street_edge)
     layout = core.best_layout(
         polygon, z, setback, access_points,
-        street_edge=street_edge, progress=progress,
+        street_edge=street_edge, progress=progress, cancel=cancel,
     )
     if not layout:
         return None, "No parking bay fits inside the perimeter drive."
@@ -234,32 +283,47 @@ def draw_layout_geometry(boundary_id, street_edge, setback, layout, site_label=N
     access_points = core.access_points_on_street_edge(street_edge)
     setup_layers()
     created = []
+    cancellation_checkpoint(created)
 
     reference_copy = rs.CopyObject(boundary_id)
     if reference_copy:
         rs.ObjectLayer(reference_copy, LAYERS["boundary"])
         created.append(reference_copy)
+        track_created([reference_copy])
 
-    created.extend(draw_ring(polygon, z, layout))
-    created.extend(draw_street_edge(street_edge, z))
-    created.extend(draw_access(polygon, z, layout, access_points, street_edge))
-    created.extend(draw_curbs(polygon, z, layout, setback, street_edge))
+    new_objects = draw_ring(polygon, z, layout)
+    created.extend(track_created(new_objects))
+    cancellation_checkpoint(created)
+    new_objects = draw_street_edge(street_edge, z)
+    created.extend(track_created(new_objects))
+    new_objects = draw_access(polygon, z, layout, access_points, street_edge)
+    created.extend(track_created(new_objects))
+    new_objects = draw_curbs(polygon, z, layout, setback, street_edge)
+    created.extend(track_created(new_objects))
+    cancellation_checkpoint(created)
 
     land = core.layout_land_use(polygon, layout, setback, street_edge, z)
-    for region in land["non_drivable"]:
+    for index, region in enumerate(land["non_drivable"]):
+        if index % 16 == 0:
+            cancellation_checkpoint(created)
         object_id = add_polyline(region, LAYERS["non_drivable"])
         if object_id:
             created.append(object_id)
+            track_created([object_id])
 
-    for stall in land["standing"]:
+    for index, stall in enumerate(land["standing"]):
+        if index % 32 == 0:
+            cancellation_checkpoint(created)
         object_id = add_polyline(stall, LAYERS["stalls"])
         if object_id:
             created.append(object_id)
+            track_created([object_id])
 
     group_name = "Parking Layout"
     if site_label:
         group_name = "Parking Layout — %s" % site_label
     if created:
+        cancellation_checkpoint(created)
         group = rs.AddGroup(group_name)
         if group:
             rs.AddObjectsToGroup(created, group)
@@ -343,7 +407,8 @@ def collect_street_edges(sites):
     return jobs
 
 
-def main():
+def run_layout():
+    _ACTIVE_CREATED[:] = []
     # ── Phase 1: gather every human input that does not need a solve ──
     boundary_ids = collect_site_curves()
     if not boundary_ids:
@@ -523,6 +588,22 @@ def main():
         ok_count, len(sites), total_stalls,
     )
     rs.MessageBox(header + "\n".join(lines), 64, "Parking Layout")
+    # Keep completed geometry, but stop treating it as rollback state.
+    _ACTIVE_CREATED[:] = []
+
+
+def main():
+    clear_escape()
+    try:
+        run_layout()
+    except core.LayoutCancelled:
+        try:
+            rs.UnselectAllObjects()
+            rs.Redraw()
+        except Exception:
+            pass
+        clear_escape()
+        rs.Prompt("Parking layout cancelled.")
 
 
 if __name__ == "__main__":

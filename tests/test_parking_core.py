@@ -187,6 +187,25 @@ class GeometryFailureRegressionTests(unittest.TestCase):
     ]
     ACUTE_WEDGE = [(0, 0), (400, 0), (0, 60)]
 
+    def test_layout_can_be_cancelled_at_deep_checkpoints(self):
+        parcel = [(0, 0), (300, 0), (300, 400), (0, 400)]
+        street = core.street_edge_from_index(parcel, 0)
+        checks = [0]
+
+        def cancel():
+            checks[0] += 1
+            return checks[0] >= 8
+
+        with self.assertRaises(core.LayoutCancelled):
+            core.best_layout(
+                parcel, 0.0, 5.0,
+                core.access_points_on_street_edge(street),
+                street_edge=street,
+                cancel=cancel,
+            )
+        self.assertGreaterEqual(checks[0], 8)
+        self.assertIsNone(core._CANCEL_CHECKER)
+
     def test_offset_rejects_flipped_u_shape_core(self):
         # Deep offset used to flip the U and invent a courtyard core.
         self.assertIsNone(core.offset_polygon(self.U_SHAPE, 47.0))

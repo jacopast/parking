@@ -50,6 +50,13 @@ User flow in Rhino (collect ALL human inputs first, then solve):
    NO model text labels on geometry.
 7. Combined MessageBox summary per site: stall count, perimeter stalls,
    aisle orientation, street length, ADA counts.
+8. ESC cancels the WHOLE run at any time:
+   - poll during direction screening, every developed option / lattice phase,
+     field combinations, grid erosion, flood fill, and drawing loops
+   - raise one core `LayoutCancelled` signal; Rhino catches it at the command
+     boundary
+   - delete geometry created by the active run, unselect, redraw, and return
+     without a modal error dialog
 
 Layers (Parking Layout):
 - Available Area

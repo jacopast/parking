@@ -117,6 +117,19 @@ MAX_BOUNDARY_VERTICES = 48
 CURVE_DIVIDE_COUNT = 96
 
 
+class LayoutCancelled(Exception):
+    """Raised when the caller requests cancellation (for example Rhino ESC)."""
+
+
+_CANCEL_CHECKER = None
+
+
+def cancellation_checkpoint():
+    """Raise LayoutCancelled when the active caller reports cancellation."""
+    if _CANCEL_CHECKER is not None and _CANCEL_CHECKER():
+        raise LayoutCancelled("Parking layout cancelled.")
+
+
 def module_geometry(park_angle, flow, stall_width=STALL_WIDTH):
     """Return the standard module dimensions for one park angle."""
     radians = math.radians(park_angle)
@@ -842,6 +855,8 @@ def flood_fill_driveable(drive_polygon, seeds, cell=4.0, blocked=None):
     # against every stall made this the slowest step on large sites.
     open_cells = set()
     for row in range(rows):
+        if row % 16 == 0:
+            cancellation_checkpoint()
         y = min_y + (row + 0.5) * cell
         hits = []
         for index in range(len(poly)):
@@ -858,7 +873,9 @@ def flood_fill_driveable(drive_polygon, seeds, cell=4.0, blocked=None):
             for col in range(col_start, col_end + 1):
                 open_cells.add((col, row))
 
-    for obstacle in blocked or []:
+    for obstacle_index, obstacle in enumerate(blocked or []):
+        if obstacle_index % 32 == 0:
+            cancellation_checkpoint()
         obs = as_xy_polygon(obstacle)
         if len(obs) < 3:
             continue
@@ -891,6 +908,8 @@ def flood_fill_driveable(drive_polygon, seeds, cell=4.0, blocked=None):
                     queue.append(key)
 
     while queue:
+        if len(reached) % 4096 == 0:
+            cancellation_checkpoint()
         col, row = queue.pop()
         for dc, dr in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             key = (col + dc, row + dr)
@@ -1721,6 +1740,8 @@ def _core_binary_grid(polygon, basis, margin=0.0):
     half_diagonal = cell * 0.7072
     grid = []
     for row in range(rows):
+        if row % 16 == 0:
+            cancellation_checkpoint()
         v = min_v + (row + 0.5) * cell
         line = []
         for col in range(cols):
@@ -1838,6 +1859,7 @@ def _raster_field_candidates(polygon, basis, margin=0.0):
     # Greedy peel: largest field, then the next largest clear of it.
     blocked = [[False] * cols for _ in range(rows)]
     for _ in range(MAX_INTERIOR_FIELDS):
+        cancellation_checkpoint()
         cell_rect, area_cells = _largest_rect_in_grid(grid, rows, cols, blocked)
         if not cell_rect or area_cells <= 0:
             break
@@ -1856,6 +1878,7 @@ def _raster_field_candidates(polygon, basis, margin=0.0):
         (0, rows, half_col, cols),
     )
     for row_start, row_end, col_start, col_end in halves:
+        cancellation_checkpoint()
         if row_end - row_start < 2 or col_end - col_start < 2:
             continue
         blocked = [[True] * cols for _ in range(rows)]
@@ -2027,6 +2050,7 @@ def layout_composed_rectangular_fields(
     candidates = rectangular_field_candidates(polygon, basis, margin=0.0)
     developed = []
     for rect in candidates:
+        cancellation_checkpoint()
         # Stalls are still validated against the real core; the rectangle only
         # bounds where the ordered lattice may sit, so row ends stay aligned.
         interior = layout_for_angle(
@@ -2061,6 +2085,7 @@ def layout_composed_rectangular_fields(
                 index_sets.append((i, j, k))
 
     for indices in index_sets:
+        cancellation_checkpoint()
         selected = []
         compatible = True
         for index in indices:
@@ -2837,7 +2862,11 @@ def build_module_skeleton_phase(core_polygon, basis, geometry, v_phase,
     # that only avoids the 36 ft island can sit inside a neighbour's 24 ft
     # aisle and landlock a whole stall row.
     occupied_v = []
+    band_index = 0
     while center_v <= max_v + 0.001:
+        if band_index % 8 == 0:
+            cancellation_checkpoint()
+        band_index += 1
         if center_v < min_v - 0.001:
             center_v += period
             continue
@@ -3172,6 +3201,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
         best_rank = None
         seen = set()
         for phase in phases:
+            cancellation_checkpoint()
             key = round(phase % period, 3)
             if key in seen:
                 continue
@@ -3225,6 +3255,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
 
     seen = set()
     for v_phase in v_phases:
+        cancellation_checkpoint()
         v_key = round(v_phase, 3)
         for u_phase in u_phases:
             key = (v_key, round(u_phase, 3))
@@ -3472,7 +3503,9 @@ def perimeter_row(polygon, z, base_offset, placed=None, stall_width=STALL_WIDTH,
         polygon, stall_width * min_slots, skip_index=street_index,
     )
 
-    for (ax, ay), (bx, by), _members in runs:
+    for run_index, ((ax, ay), (bx, by), _members) in enumerate(runs):
+        if run_index % 8 == 0:
+            cancellation_checkpoint()
         edge_length = math.hypot(bx - ax, by - ay)
         dx = (bx - ax) / edge_length
         dy = (by - ay) / edge_length
@@ -3981,10 +4014,12 @@ def try_offset_layouts(polygon, basis, z, setback, geometry, stall_width, street
     for variant in build_offset_variants(
         polygon, z, setback, stall_width, street_edge,
     ):
+        cancellation_checkpoint()
         perimeter_stalls = variant["stalls"]
         perimeter_islands = variant["islands"]
         ring_outer = variant["ring_outer"]
         for chamfer_side in chamfer_sides:
+            cancellation_checkpoint()
             candidate, interior = develop(
                 variant["edge_outer"], ring_outer, chamfer_side,
                 perimeter_stalls, perimeter_islands,
@@ -4050,6 +4085,7 @@ def screen_orientations(polygon, z, setback, orientations, geometry,
     period = geometry["double_module"]
     scored = []
     for angle in orientations:
+        cancellation_checkpoint()
         basis = make_basis(origin, angle)
         best_estimate = 0
         for phase in (0.0, period * 0.5):
@@ -4101,6 +4137,7 @@ def _search_layouts(polygon, z, setback, access_points, stall_width,
     option_candidates = []
 
     for index, angle in enumerate(orientations, start=1):
+        cancellation_checkpoint()
         if progress:
             progress(
                 "Developing option %d of %d (%.0f deg)"
@@ -4109,6 +4146,7 @@ def _search_layouts(polygon, z, setback, access_points, stall_width,
         basis = make_basis(origin, angle)
         orientation_best = None
         for geometry in geometries:
+            cancellation_checkpoint()
             # Prefer rings that follow the parcel so the site is not over-cut.
             offset = try_offset_layouts(
                 polygon, basis, z, setback, geometry, stall_width, street_edge,
@@ -4160,33 +4198,41 @@ def _search_layouts(polygon, z, setback, access_points, stall_width,
 
 
 def best_layout(polygon, z, setback, access_points=None, stall_width=STALL_WIDTH,
-                street_edge=None, progress=None):
+                street_edge=None, progress=None, cancel=None):
     """Pack with 90 degree stalls; diagonal only if perpendicular finds nothing.
 
-    ``progress`` is an optional callable receiving short status strings so a
-    caller can keep the user informed during a long solve.
+    ``progress`` receives short status strings. ``cancel`` is polled at
+    frequent checkpoints and should return True when the caller wants to stop.
     """
-    if street_edge and not access_points:
-        access_points = access_points_on_street_edge(street_edge)
+    global _CANCEL_CHECKER
+    previous_checker = _CANCEL_CHECKER
+    _CANCEL_CHECKER = cancel
+    try:
+        cancellation_checkpoint()
+        if street_edge and not access_points:
+            access_points = access_points_on_street_edge(street_edge)
 
-    best = _search_layouts(
-        polygon, z, setback, access_points, stall_width, PARK_CONFIGS,
-        street_edge, progress=progress,
-    )
-
-    if best is None:
         best = _search_layouts(
-            polygon, z, setback, access_points, stall_width,
-            DIAGONAL_FALLBACK_CONFIGS, street_edge, progress=progress,
+            polygon, z, setback, access_points, stall_width, PARK_CONFIGS,
+            street_edge, progress=progress,
         )
 
-    if best:
-        for candidate in best.get("option_layouts", []) + [best]:
-            candidate["ada"] = ada_stall_count(candidate["stall_count"])
-            if street_edge:
-                candidate["street_edge"] = street_edge
+        if best is None:
+            best = _search_layouts(
+                polygon, z, setback, access_points, stall_width,
+                DIAGONAL_FALLBACK_CONFIGS, street_edge, progress=progress,
+            )
 
-    return best
+        cancellation_checkpoint()
+        if best:
+            for candidate in best.get("option_layouts", []) + [best]:
+                candidate["ada"] = ada_stall_count(candidate["stall_count"])
+                if street_edge:
+                    candidate["street_edge"] = street_edge
+
+        return best
+    finally:
+        _CANCEL_CHECKER = previous_checker
 
 
 def option_layouts(layout):
@@ -4420,6 +4466,8 @@ def erode_polygon_components(polygon, distance, cell=2.5):
         clearance = 0.0
 
     for row in range(rows):
+        if row % 16 == 0:
+            cancellation_checkpoint()
         y = min_y + (row + 0.5) * cell
         for col in range(cols):
             x = min_x + (col + 0.5) * cell
@@ -4433,6 +4481,8 @@ def erode_polygon_components(polygon, distance, cell=2.5):
     seen = [[False] * cols for _ in range(rows)]
     components = []
     for row in range(rows):
+        if row % 16 == 0:
+            cancellation_checkpoint()
         for col in range(cols):
             if not keep[row][col] or seen[row][col]:
                 continue

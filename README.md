@@ -242,6 +242,10 @@ This gives a practical first-pass answer on whether a garage is needed and what 
 7. If you chose pick-orientation, select among the scored options per site.
 8. Review the generated layers (`Parking Layout — Site N`) and the summary.
 
+Press **Esc at any time** to cancel the entire run. The solver checks Esc
+during orientation screening, phase/field search, erosion, connectivity, and
+drawing. Geometry drawn by the active run is rolled back on cancellation.
+
 ## Validation
 
 This repository does not require Node, npm, or a web build. Building the `.rhp` requires the .NET 8 SDK.
