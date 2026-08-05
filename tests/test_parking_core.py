@@ -292,6 +292,47 @@ class GeometryFailureRegressionTests(unittest.TestCase):
                 )
             )
 
+    def test_end_caps_reach_core_edge_and_mid_islands_stay_square(self):
+        street = core.street_edge_from_index(REFERENCE_SITE, 0)
+        layout = core.best_layout(
+            REFERENCE_SITE, 0.0, 5.0,
+            core.access_points_on_street_edge(street),
+            street_edge=street,
+        )
+        horizontal = min(
+            core.option_layouts(layout),
+            key=lambda option: abs(core.angle_key(option["angle"])),
+        )
+        kinds = horizontal["island_kinds"]
+        islands = horizontal["islands"]
+        self.assertEqual(len(kinds), len(islands))
+        self.assertIn("terminal", kinds)
+        self.assertIn("interior", kinds)
+
+        inner = core.as_xy_polygon(horizontal["ring_inner_poly"])
+        for kind, island in zip(kinds, islands):
+            if kind != "terminal":
+                continue
+            for x, y in core.as_xy_polygon(island):
+                self.assertTrue(
+                    core.point_inside(inner, x, y)
+                    or core.distance_to_polygon(inner, x, y) < 1.5,
+                    msg="end cap escaped the parking core",
+                )
+
+        # Mid-row islands are drawn square; end caps keep their R5 return.
+        curves = core.rounded_layout_islands(horizontal, 0.0)
+        self.assertEqual(len(curves), len(islands))
+        for kind, island, curve in zip(kinds, islands, curves):
+            if kind != "interior":
+                continue
+            self.assertLessEqual(len(core.as_xy_polygon(curve)), 5)
+            self.assertEqual(
+                len(core.as_xy_polygon(island)),
+                4,
+                msg="mid-row island must stay a plain rectangle",
+            )
+
     def test_all_true_spans_keeps_every_lobe(self):
         flags = [False, True, True, False, True, True, True, False, True]
         self.assertEqual(core.all_true_spans(flags, 2), [(1, 3), (4, 7)])

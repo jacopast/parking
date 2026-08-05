@@ -267,6 +267,22 @@ STEP H — Roles / islands BEFORE filling stalls
   End-caps exist so cars can turn at the cross aisle. Never park into the tip
   of a row at the aisle intersection.
 
+  Island SHAPE rules (a floating capsule with dead pavement behind it is the
+  classic tell that the plan was not finished):
+  - END-CAP islands span the full 36 ft bay width, keep the stepped inner face
+    where the two rows end at different columns, and then GROW OUTWARD to the
+    parking-core edge, capped at END_CAP_MAX_EXTEND.
+  - The outer face is ONE straight chamfer, not a staircase: take the chord
+    through the sampled core limits and pull it back until it clears every
+    sample. A straight core edge reproduces itself; a curved edge gets a clean
+    chord. Fillet the end-cap corners at R5.
+  - MID-ROW islands stay square with the stall grid: a plain 9 x 36 ft
+    rectangle, no fillet. They sit between stall stripes on both sides, so
+    there is no curb for a car to turn against.
+  - Clip leftover landscape bands to the core polygon. They are measured on
+    the core bounding box, so a tapered parcel otherwise gets a green bar
+    hanging outside the site.
+
 STEP I — Populate stalls LAST
   - Stalls are struck from the aisle face back to the shared island spine.
   - Emit a closed BAY ENVELOPE per island (its stepped outline) and draw

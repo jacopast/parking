@@ -66,6 +66,10 @@ MIN_DRIVE_CORNER_DEG = 90.0
 # end so cars can turn at the aisle intersection. Width tracks the stall
 # pitch (codes often cite 6x6 min or ~11 ft landscape islands).
 TERMINAL_ISLAND_COLUMNS = 1
+# A bay end that stops short of an angled core edge leaves a dead wedge of
+# pavement. The end-cap island grows into it and follows the edge instead of
+# floating as a capsule with an unusable gap behind it.
+END_CAP_MAX_EXTEND = 30.0
 # Maximum consecutive stalls between landscape islands in a run.
 MAX_STALLS_BETWEEN_ISLANDS = 10
 # Manual drawing standard for terminal islands and curb returns.
@@ -2010,6 +2014,7 @@ def merge_rectangular_interiors(interiors, basis, geometry, z):
         "aisles": [],
         "bay_envelopes": [],
         "islands": [],
+        "island_kinds": [],
         "absorb_landscape": [],
         "awkward_pad": 0.0,
         "stall_count": 0,
@@ -2031,6 +2036,10 @@ def merge_rectangular_interiors(interiors, basis, geometry, z):
             "absorb_landscape", "skeleton_runs",
         ):
             merged[key].extend(interior.get(key) or [])
+        kinds = list(interior.get("island_kinds") or [])
+        if len(kinds) != len(interior.get("islands") or []):
+            kinds = ["terminal"] * len(interior.get("islands") or [])
+        merged["island_kinds"].extend(kinds)
         merged["stall_count"] += interior.get("stall_count", 0)
         merged["run_count"] += interior.get("run_count", 0)
         merged["connected_run_count"] += interior.get("connected_run_count", 0)
@@ -2237,6 +2246,99 @@ def island_from_local_shape(basis, shape, z):
         (to_world(basis, su, sv)[0], to_world(basis, su, sv)[1], z)
         for su, sv in shape
     ]
+
+
+def _core_u_limit(core_polygon, basis, v, reference_u, direction):
+    """How far the core reaches from ``reference_u`` at height ``v``."""
+    if core_polygon is None:
+        return None
+    intervals = scanline_intervals(core_polygon, basis, v)
+    if not intervals:
+        return None
+    for left, right in intervals:
+        if left - 0.5 <= reference_u <= right + 0.5:
+            return right if direction > 0 else left
+
+    # A tapered bay can reach past the core at one end of its band. The limit
+    # is then the nearest core edge, not "unbounded".
+    nearest = None
+    nearest_gap = None
+    for left, right in intervals:
+        edge = right if direction > 0 else left
+        gap = abs(reference_u - edge)
+        if nearest_gap is None or gap < nearest_gap:
+            nearest_gap = gap
+            nearest = edge
+    return nearest
+
+
+def _end_cap_shape(basis, geometry, core_polygon, center_v,
+                   lower_end_u, upper_end_u, direction):
+    """End-cap island that fills the wedge out to an angled core edge.
+
+    ``lower_end_u`` / ``upper_end_u`` are the inner faces of the cap on each
+    row. The outer face is sampled against the core so a diagonal boundary is
+    followed instead of leaving a triangle of unusable pavement.
+    """
+    depth = geometry["row_depth"]
+    v0 = center_v - depth
+    v1 = center_v + depth
+    inner_extreme = (
+        max(lower_end_u, upper_end_u)
+        if direction > 0
+        else min(lower_end_u, upper_end_u)
+    )
+
+    nominal = inner_extreme + direction * TERMINAL_ISLAND_COLUMNS * geometry["stall_pitch"]
+    ceiling = inner_extreme + direction * END_CAP_MAX_EXTEND
+
+    def clamp(limit):
+        # Only the reach is capped here. A nominal floor must never push the
+        # cap past the real core edge, or a tapered bay end escapes the site.
+        if limit is None:
+            return nominal
+        if direction > 0:
+            return min(limit, ceiling)
+        return max(limit, ceiling)
+
+    steps = 8
+    samples = [v0 + (v1 - v0) * index / float(steps) for index in range(steps + 1)]
+    limits = [
+        clamp(_core_u_limit(core_polygon, basis, sample_v, inner_extreme, direction))
+        for sample_v in samples
+    ]
+
+    # One straight chamfer, not a staircase: take the chord through the end
+    # limits, then pull it back until it clears every sampled limit. A straight
+    # core edge reproduces itself exactly; a curved one gets a clean chord.
+    start_limit = limits[0]
+    end_limit = limits[-1]
+    span = v1 - v0
+    overshoot = 0.0
+    for sample_v, limit in zip(samples, limits):
+        t = 0.0 if span <= 1e-9 else (sample_v - v0) / span
+        chord = start_limit + (end_limit - start_limit) * t
+        overshoot = max(overshoot, (chord - limit) * direction)
+    if overshoot > 0.0:
+        start_limit -= direction * overshoot
+        end_limit -= direction * overshoot
+
+    # Keep at least the nominal end cap, but never beyond what the core allows.
+    if direction > 0:
+        start_limit = max(start_limit, min(nominal, limits[0]))
+        end_limit = max(end_limit, min(nominal, limits[-1]))
+    else:
+        start_limit = min(start_limit, max(nominal, limits[0]))
+        end_limit = min(end_limit, max(nominal, limits[-1]))
+
+    inner = [
+        (lower_end_u, v0),
+        (lower_end_u, center_v),
+        (upper_end_u, center_v),
+        (upper_end_u, v1),
+    ]
+    outer = [(end_limit, v1), (start_limit, v0)]
+    return _dedupe_uv(inner + outer)
 
 
 def build_bay_skeleton(
@@ -3038,10 +3140,11 @@ def bay_envelope_uv(run, geometry):
     return _dedupe_uv(points)
 
 
-def materialize_module_skeleton(skeleton, basis, geometry, z):
+def materialize_module_skeleton(skeleton, basis, geometry, z, core_polygon=None):
     """Populate stall stripes, end caps and bay outlines around the skeleton."""
     stalls = []
     islands = []
+    island_kinds = []
     aisles = []
     envelopes = []
     pitch = geometry["stall_pitch"]
@@ -3084,38 +3187,35 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
                     (u, center_v + depth),
                 ]
                 islands.append(island_from_local_shape(basis, shape, z))
+                island_kinds.append("interior")
             else:
                 islands.append(island_from_local_shape(basis, cells[0][2], z))
+                island_kinds.append("interior")
 
         rows_by_sign = dict((row["sign"], row) for row in run["rows"])
         lower = rows_by_sign.get(-1.0)
         upper = rows_by_sign.get(1.0)
         if lower is not None and upper is not None:
-            # One stepped cap joins both row ends.  When a tapered parcel
-            # makes one row longer, the centre-line connector fills the step
-            # and produces the single wedge-shaped terminal island shown in
-            # the manual plan.
+            # One cap joins both row ends and then grows out to the core edge,
+            # so an angled boundary is followed instead of leaving a wedge of
+            # pavement no car can use.
             terminal_width = TERMINAL_ISLAND_COLUMNS * pitch
             for at_start in (True, False):
                 if at_start:
-                    lu0, lu1 = lower["u0"], lower["u0"] + terminal_width
-                    uu0, uu1 = upper["u0"], upper["u0"] + terminal_width
+                    lower_face = lower["u0"] + terminal_width
+                    upper_face = upper["u0"] + terminal_width
+                    direction = -1.0
                 else:
-                    lu0, lu1 = lower["u1"] - terminal_width, lower["u1"]
-                    uu0, uu1 = upper["u1"] - terminal_width, upper["u1"]
-                shape = [
-                    (lu0, center_v - depth),
-                    (lu1, center_v - depth),
-                    (lu1, center_v),
-                    (uu1, center_v),
-                    (uu1, center_v + depth),
-                    (uu0, center_v + depth),
-                    (uu0, center_v),
-                    (lu0, center_v),
-                ]
-                islands.append(island_from_local_shape(
-                    basis, _dedupe_uv(shape), z,
-                ))
+                    lower_face = lower["u1"] - terminal_width
+                    upper_face = upper["u1"] - terminal_width
+                    direction = 1.0
+                shape = _end_cap_shape(
+                    basis, geometry, core_polygon, center_v,
+                    lower_face, upper_face, direction,
+                )
+                if len(shape) >= 3:
+                    islands.append(island_from_local_shape(basis, shape, z))
+                    island_kinds.append("terminal")
         else:
             # Single-loaded remainder strip: rectangular end caps only.
             row = lower or upper
@@ -3129,6 +3229,7 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
                         u0, u1 = row["u1"] - terminal_width, row["u1"]
                     shape = [(u0, rv0), (u1, rv0), (u1, rv1), (u0, rv1)]
                     islands.append(island_from_local_shape(basis, shape, z))
+                    island_kinds.append("terminal")
 
         envelopes.append(island_from_local_shape(
             basis, bay_envelope_uv(run, geometry), z,
@@ -3138,13 +3239,28 @@ def materialize_module_skeleton(skeleton, basis, geometry, z):
     for u0, u1, v0, v1 in skeleton.get("absorb_bands_uv") or []:
         if u1 - u0 < 1.0 or v1 - v0 < MIN_AWKWARD_LEFTOVER:
             continue
-        absorb.append(rect_world_polygon(basis, u0, u1, v0, v1, z))
+        # Bands are measured on the core's bounding box, so clip them back to
+        # the core itself or a tapered parcel gets a green bar hanging outside.
+        spans = (
+            _strip_intervals_cached(core_polygon, basis, v0, v1)
+            if core_polygon is not None
+            else [(u0, u1)]
+        )
+        for left, right in spans or []:
+            clipped_u0 = max(u0, left)
+            clipped_u1 = min(u1, right)
+            if clipped_u1 - clipped_u0 < STALL_WIDTH:
+                continue
+            absorb.append(
+                rect_world_polygon(basis, clipped_u0, clipped_u1, v0, v1, z)
+            )
 
     return {
         "stalls": stalls,
         "aisles": aisles,
         "bay_envelopes": envelopes,
         "islands": islands,
+        "island_kinds": island_kinds,
         "absorb_landscape": absorb,
         "awkward_pad": skeleton.get("awkward_pad", 0.0),
         "stall_count": len(stalls),
@@ -3224,7 +3340,7 @@ def layout_for_angle(polygon, basis, clearance, z, geometry, drive_polygon=None,
         lattice = None
         if best_skeleton:
             lattice = materialize_module_skeleton(
-                best_skeleton, basis, geometry, z,
+                best_skeleton, basis, geometry, z, core_polygon=polygon,
             )
         if composed and lattice:
             # Ordered rectangles are the preferred product. Fall back to the
@@ -3687,8 +3803,14 @@ def compose_candidate(
         )
     ]
     islands = perimeter_islands
+    island_kinds = ["perimeter"] * len(perimeter_islands)
     if interior:
-        islands.extend(interior.get("islands") or [])
+        interior_islands = interior.get("islands") or []
+        islands.extend(interior_islands)
+        kinds = list(interior.get("island_kinds") or [])
+        if len(kinds) != len(interior_islands):
+            kinds = ["terminal"] * len(interior_islands)
+        island_kinds.extend(kinds)
 
     pack_angle = basis["angle"]
     street_align = 0
@@ -3710,6 +3832,7 @@ def compose_candidate(
         "aisles": interior["aisles"] if interior else [],
         "bay_envelopes": interior.get("bay_envelopes", []) if interior else [],
         "islands": islands,
+        "island_kinds": island_kinds,
         "absorb_landscape": list(interior.get("absorb_landscape") or []) if interior else [],
         "interior_fields": list(interior.get("interior_fields") or []) if interior else [],
         "interior_field_count": len(interior.get("interior_fields") or []) if interior else 0,
@@ -4944,8 +5067,19 @@ def tip_pocket_islands(site_polygon, layout, z, radius=CURB_FILLET_RADIUS * 1.6)
 
 
 def rounded_layout_islands(layout, z, radius=CURB_FILLET_RADIUS):
+    """Curb loops for landscape islands.
+
+    End caps get the R5 curb return a car turns against. Mid-row islands sit
+    between stall stripes on both sides, so they stay square with the grid.
+    """
+    islands = layout.get("islands", [])
+    kinds = layout.get("island_kinds") or []
     rounded = []
-    for island in layout.get("islands", []):
+    for index, island in enumerate(islands):
+        kind = kinds[index] if index < len(kinds) else "terminal"
+        if kind == "interior":
+            rounded.append(_closed_xyz(as_xy_polygon(island), z))
+            continue
         curve = fillet_closed_polygon(island, z, radius)
         if curve:
             rounded.append(curve)
